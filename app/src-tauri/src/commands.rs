@@ -98,50 +98,63 @@ pub fn find_all_duplicates(
 ///
 /// Emits `scan-progress` events via the app handle for real-time UI updates.
 /// Existing store content is preserved (incremental).
+/// Runs on a background thread so the UI stays responsive.
 #[tauri::command]
-pub fn scan_directory(
+pub async fn scan_directory(
     app: AppHandle,
     state: State<'_, AppState>,
     source: String,
     store_path: String,
     target_path: String,
 ) -> Result<ScanStats, String> {
-    let store_path = PathBuf::from(&store_path);
+    let store_path_buf = PathBuf::from(&store_path);
     let source_path = PathBuf::from(&source);
 
-    // Reuse existing store if same path, otherwise open new
-    {
+    // Take the store out of state (or open a fresh one).
+    // redb locks the DB file, so we can't have two Store handles simultaneously.
+    let store = {
         let current_store_path = state.store_path.lock().map_err(|e| e.to_string())?;
         let mut store_guard = state.store.lock().map_err(|e| e.to_string())?;
 
-        if store_guard.is_none() || *current_store_path != store_path {
-            *store_guard = Some(Store::open(&store_path).map_err(|e| e.to_string())?);
+        if store_guard.is_some() && *current_store_path == store_path_buf {
+            // Take ownership — state becomes None temporarily
+            store_guard.take().unwrap()
+        } else {
+            // Drop existing store (if any) before opening new path
+            store_guard.take();
+            Store::open(&store_path_buf).map_err(|e| e.to_string())?
         }
-    }
+    };
 
     // Update the stored path
     {
         let mut sp = state.store_path.lock().map_err(|e| e.to_string())?;
-        *sp = store_path;
+        *sp = store_path_buf.clone();
     }
 
-    // Run scan with progress callback
-    let store_guard = state.store.lock().map_err(|e| e.to_string())?;
-    let store = store_guard
-        .as_ref()
-        .ok_or_else(|| "Failed to open store.".to_string())?;
+    // Spawn the heavy scanning work on a blocking thread
+    let result = tokio::task::spawn_blocking(move || {
+        let stats = store
+            .scan_into(
+                &source_path,
+                &target_path,
+                move |progress: &ScanProgress| {
+                    let _ = app.emit("scan-progress", progress.clone());
+                },
+            )
+            .map_err(|e| e.to_string());
+        (store, stats)
+    })
+    .await
+    .map_err(|e| format!("Scan task failed: {e}"))?;
 
-    let app_clone = app.clone();
-    let stats = store
-        .scan_into(
-            &source_path,
-            &target_path,
-            move |progress: &ScanProgress| {
-                // Emit progress event — ignore errors (UI might not be listening)
-                let _ = app_clone.emit("scan-progress", progress.clone());
-            },
-        )
-        .map_err(|e| e.to_string())?;
+    let (store, stats) = result;
 
-    Ok(stats)
+    // Put the store back into state so subsequent queries work
+    {
+        let mut store_guard = state.store.lock().map_err(|e| e.to_string())?;
+        *store_guard = Some(store);
+    }
+
+    stats
 }
