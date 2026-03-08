@@ -8,21 +8,61 @@ use walkdir::WalkDir;
 use crate::cid as cid_util;
 use crate::content_store::ContentStore;
 use crate::metadata::MetadataDb;
-use crate::types::{DirMetadata, FileMetadata, ScanStats};
+use crate::types::{DirMetadata, FileMetadata, ScanProgress, ScanStats};
 
 /// Scan a source directory and replicate it into a content-addressed store.
 ///
-/// - Files are hashed (BLAKE3 → CIDv1), LZ4-compressed, and stored as blobs.
-/// - Metadata (paths, sizes, timestamps) is recorded in the redb database.
-/// - Duplicate files (same content) are stored only once.
+/// Files are placed under the virtual root `/`.
+/// This is a convenience wrapper around [`scan_directory_into`].
 pub fn scan_directory(
     source: &Path,
     content_store: &ContentStore,
     metadata_db: &MetadataDb,
 ) -> Result<ScanStats> {
+    scan_directory_into(source, "/", content_store, metadata_db, |_| {})
+}
+
+/// Scan a source directory and place its contents under `target_prefix` in
+/// the virtual filesystem.
+///
+/// - If `target_prefix` is `"/"`, files go to `/foo.txt`, `/sub/bar.txt`, etc.
+/// - If `target_prefix` is `"/photos/vacation"`, files go to
+///   `/photos/vacation/foo.txt`, etc.
+/// - Existing entries in the store are preserved (incremental).
+/// - Duplicate content is stored only once (deduplicated).
+///
+/// The `on_progress` callback is invoked after each file is processed,
+/// enabling real-time progress reporting.
+pub fn scan_directory_into<F>(
+    source: &Path,
+    target_prefix: &str,
+    content_store: &ContentStore,
+    metadata_db: &MetadataDb,
+    on_progress: F,
+) -> Result<ScanStats>
+where
+    F: Fn(&ScanProgress),
+{
     let source = source
         .canonicalize()
         .with_context(|| format!("source directory not found: {}", source.display()))?;
+
+    // Normalize target prefix: ensure it starts with / and has no trailing /
+    let prefix = if target_prefix == "/" || target_prefix.is_empty() {
+        String::new()
+    } else {
+        let p = target_prefix.trim_end_matches('/');
+        if p.starts_with('/') {
+            p.to_string()
+        } else {
+            format!("/{p}")
+        }
+    };
+
+    // Ensure the target directory itself is registered if it's not root
+    if !prefix.is_empty() {
+        ensure_parent_dirs(metadata_db, &prefix)?;
+    }
 
     let mut stats = ScanStats::new();
 
@@ -35,31 +75,27 @@ pub fn scan_directory(
             .strip_prefix(&source)
             .context("failed to compute relative path")?;
 
-        // Normalize to forward-slash virtual path
-        let virtual_path = if relative.as_os_str().is_empty() {
-            "/".to_string()
+        let rel_str = relative.to_string_lossy().replace('\\', "/");
+
+        // Build the full virtual path under the target prefix
+        let virtual_path = if rel_str.is_empty() {
+            if prefix.is_empty() {
+                continue; // skip root when scanning into /
+            } else {
+                prefix.clone()
+            }
         } else {
-            format!("/{}", relative.to_string_lossy().replace('\\', "/"))
+            format!("{prefix}/{rel_str}")
         };
 
         let fs_meta = fs::metadata(abs_path)
             .with_context(|| format!("failed to read metadata: {}", abs_path.display()))?;
 
         if fs_meta.is_dir() {
-            // Skip the root directory itself
-            if virtual_path == "/" {
-                continue;
-            }
-
-            let modified = fs_meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+            let modified = extract_mtime(&fs_meta);
 
             let dir_meta = DirMetadata {
-                child_count: 0, // Will be approximate; updated below is optional
+                child_count: 0,
                 modified,
             };
             metadata_db
@@ -86,13 +122,7 @@ pub fn scan_directory(
                 stats.duplicate_files += 1;
             }
 
-            let modified = fs_meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-
+            let modified = extract_mtime(&fs_meta);
             let created = fs_meta
                 .created()
                 .ok()
@@ -123,11 +153,51 @@ pub fn scan_directory(
 
             stats.total_files += 1;
             stats.total_original_bytes += data.len() as u64;
+
+            // Emit progress
+            on_progress(&ScanProgress {
+                files_processed: stats.total_files,
+                dirs_processed: stats.total_dirs,
+                bytes_processed: stats.total_original_bytes,
+                bytes_stored: stats.total_stored_bytes,
+                duplicates_found: stats.duplicate_files,
+                current_file: virtual_path,
+            });
         }
         // Skip symlinks, special files, etc.
     }
 
     Ok(stats)
+}
+
+/// Ensure all ancestor directories of `path` exist in the metadata db.
+/// For example, for "/a/b/c", ensures "/a" and "/a/b" and "/a/b/c" are registered.
+fn ensure_parent_dirs(metadata_db: &MetadataDb, path: &str) -> Result<()> {
+    let parts: Vec<&str> = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut current = String::new();
+    for part in parts {
+        current = format!("{current}/{part}");
+        // Only insert if not already present — insert_dir is idempotent (upsert)
+        let dir_meta = DirMetadata {
+            child_count: 0,
+            modified: 0,
+        };
+        metadata_db.insert_dir(&current, &dir_meta)?;
+    }
+    Ok(())
+}
+
+fn extract_mtime(meta: &fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -150,7 +220,6 @@ mod tests {
     fn scan_simple_directory() {
         let (source_dir, _store_dir, content_store, metadata_db) = setup_test_store();
 
-        // Create test files
         fs::write(source_dir.path().join("hello.txt"), b"hello world").unwrap();
         fs::write(source_dir.path().join("bye.txt"), b"goodbye world").unwrap();
         fs::create_dir(source_dir.path().join("subdir")).unwrap();
@@ -172,7 +241,6 @@ mod tests {
     fn scan_detects_duplicates() {
         let (source_dir, _store_dir, content_store, metadata_db) = setup_test_store();
 
-        // Same content in two different files
         fs::write(source_dir.path().join("file1.txt"), b"identical").unwrap();
         fs::write(source_dir.path().join("file2.txt"), b"identical").unwrap();
         fs::write(source_dir.path().join("unique.txt"), b"different").unwrap();
@@ -192,10 +260,88 @@ mod tests {
 
         scan_directory(source_dir.path(), &content_store, &metadata_db).unwrap();
 
-        // Should be able to resolve the file
         let meta = metadata_db.get_file("/test.txt").unwrap();
         assert!(meta.is_some());
         let meta = meta.unwrap();
-        assert_eq!(meta.original_size, 12); // "test content".len()
+        assert_eq!(meta.original_size, 12);
+    }
+
+    #[test]
+    fn scan_into_subdirectory() {
+        let (source_dir, _store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::write(source_dir.path().join("a.txt"), b"aaa").unwrap();
+        fs::write(source_dir.path().join("b.txt"), b"bbb").unwrap();
+
+        let stats = scan_directory_into(
+            source_dir.path(),
+            "/photos/vacation",
+            &content_store,
+            &metadata_db,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 2);
+
+        // Files should be under the target prefix
+        assert!(metadata_db
+            .get_file("/photos/vacation/a.txt")
+            .unwrap()
+            .is_some());
+        assert!(metadata_db
+            .get_file("/photos/vacation/b.txt")
+            .unwrap()
+            .is_some());
+        // Root-level should not have them
+        assert!(metadata_db.get_file("/a.txt").unwrap().is_none());
+
+        // Parent dirs should be created
+        let root_entries = metadata_db.list_dir("/").unwrap();
+        let names: Vec<&str> = root_entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"photos"));
+    }
+
+    #[test]
+    fn incremental_scan_preserves_existing() {
+        let (source1, _store_dir, content_store, metadata_db) = setup_test_store();
+
+        // First scan
+        fs::write(source1.path().join("original.txt"), b"original").unwrap();
+        scan_directory(source1.path(), &content_store, &metadata_db).unwrap();
+
+        // Second scan into a subdirectory
+        let source2 = TempDir::new().unwrap();
+        fs::write(source2.path().join("new.txt"), b"new content").unwrap();
+        scan_directory_into(
+            source2.path(),
+            "/imported",
+            &content_store,
+            &metadata_db,
+            |_| {},
+        )
+        .unwrap();
+
+        // Both should be queryable
+        assert!(metadata_db.get_file("/original.txt").unwrap().is_some());
+        assert!(metadata_db.get_file("/imported/new.txt").unwrap().is_some());
+    }
+
+    #[test]
+    fn progress_callback_fires() {
+        let (source_dir, _store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::write(source_dir.path().join("a.txt"), b"aaa").unwrap();
+        fs::write(source_dir.path().join("b.txt"), b"bbb").unwrap();
+
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let count = AtomicU64::new(0);
+        scan_directory_into(source_dir.path(), "/", &content_store, &metadata_db, |_p| {
+                count.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+        .unwrap();
+
+        assert!(count.load(Ordering::Relaxed) >= 2);
     }
 }

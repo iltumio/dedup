@@ -7,9 +7,10 @@
 		parentPath: string;
 		selectedPath: string | null;
 		onSelect: (path: string, entry: DirEntry) => void;
+		onScanInto: (targetPath: string) => void;
 	}
 
-	let { entry, parentPath, selectedPath, onSelect }: Props = $props();
+	let { entry, parentPath, selectedPath, onSelect, onScanInto }: Props = $props();
 
 	let expanded = $state(false);
 	let children = $state<DirEntry[]>([]);
@@ -38,6 +39,11 @@
 		expanded = !expanded;
 		onSelect(fullPath, entry);
 	}
+
+	function handleScanInto(e: MouseEvent) {
+		e.stopPropagation();
+		onScanInto(fullPath);
+	}
 </script>
 
 <li class="tree-node">
@@ -58,6 +64,9 @@
 		{#if !entry.is_dir}
 			<span class="size">{formatSize(entry.size)}</span>
 		{/if}
+		{#if entry.is_dir}
+			<span class="scan-into-btn" role="button" tabindex="0" onclick={handleScanInto} onkeydown={(e) => e.key === 'Enter' && handleScanInto(e)} title="Scan into this directory">+</span>
+		{/if}
 		{#if loading}
 			<span class="loading">...</span>
 		{/if}
@@ -71,6 +80,7 @@
 					parentPath={fullPath}
 					{selectedPath}
 					{onSelect}
+					{onScanInto}
 				/>
 			{/each}
 		</ul>
@@ -124,6 +134,32 @@
 	.loading {
 		color: var(--text-muted);
 		font-size: 11px;
+	}
+
+	.scan-into-btn {
+		flex-shrink: 0;
+		display: none;
+		align-items: center;
+		justify-content: center;
+		width: 20px;
+		height: 20px;
+		border-radius: 3px;
+		background: var(--accent);
+		color: var(--text);
+		font-size: 14px;
+		font-weight: bold;
+		line-height: 1;
+		cursor: pointer;
+		border: none;
+		padding: 0;
+	}
+
+	.scan-into-btn:hover {
+		background: var(--accent-hover);
+	}
+
+	.node-button:hover .scan-into-btn {
+		display: flex;
 	}
 
 	.children {

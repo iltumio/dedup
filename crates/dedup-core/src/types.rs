@@ -74,3 +74,20 @@ impl Default for ScanStats {
         Self::new()
     }
 }
+
+/// Progress information emitted during a scan operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanProgress {
+    /// Number of files processed so far.
+    pub files_processed: u64,
+    /// Number of directories processed so far.
+    pub dirs_processed: u64,
+    /// Total bytes of original content processed.
+    pub bytes_processed: u64,
+    /// Total bytes stored on disk so far (compressed, deduplicated).
+    pub bytes_stored: u64,
+    /// Number of duplicate files found so far.
+    pub duplicates_found: u64,
+    /// Name of the file currently being processed.
+    pub current_file: String,
+}

@@ -5,9 +5,10 @@
 	interface Props {
 		selectedPath: string | null;
 		onSelect: (path: string, entry: DirEntry) => void;
+		onScanInto: (targetPath: string) => void;
 	}
 
-	let { selectedPath, onSelect }: Props = $props();
+	let { selectedPath, onSelect, onScanInto }: Props = $props();
 
 	let rootEntries = $state<DirEntry[]>([]);
 	let error = $state<string | null>(null);
@@ -30,13 +31,19 @@
 <div class="file-tree">
 	<div class="header">
 		<span class="title">Files</span>
-		<button class="refresh" onclick={loadRoot} title="Refresh">⟳</button>
+		<div class="header-actions">
+			<button class="action-btn" onclick={() => onScanInto('/')} title="Scan into root">+</button>
+			<button class="action-btn" onclick={loadRoot} title="Refresh">⟳</button>
+		</div>
 	</div>
 
 	{#if error}
 		<div class="error">{error}</div>
 	{:else if rootEntries.length === 0}
-		<div class="empty">No files. Scan a directory first.</div>
+		<div class="empty">
+			<p>No files yet.</p>
+			<button class="empty-scan-btn" onclick={() => onScanInto('/')}>Scan a directory</button>
+		</div>
 	{:else}
 		<ul class="tree-root">
 			{#each rootEntries as entry (entry.name)}
@@ -45,6 +52,7 @@
 					parentPath="/"
 					{selectedPath}
 					{onSelect}
+					{onScanInto}
 				/>
 			{/each}
 		</ul>
@@ -72,13 +80,19 @@
 		font-size: 14px;
 	}
 
-	.refresh {
-		font-size: 16px;
-		padding: 4px;
-		border-radius: 4px;
+	.header-actions {
+		display: flex;
+		gap: 4px;
 	}
 
-	.refresh:hover {
+	.action-btn {
+		font-size: 16px;
+		padding: 4px 6px;
+		border-radius: 4px;
+		line-height: 1;
+	}
+
+	.action-btn:hover {
 		background: var(--bg-hover);
 	}
 
@@ -98,5 +112,21 @@
 		padding: 16px;
 		color: var(--text-muted);
 		font-size: 13px;
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		align-items: flex-start;
+	}
+
+	.empty-scan-btn {
+		padding: 6px 12px;
+		background: var(--accent);
+		border-radius: 6px;
+		font-size: 12px;
+		font-weight: 500;
+	}
+
+	.empty-scan-btn:hover {
+		background: var(--accent-light);
 	}
 </style>

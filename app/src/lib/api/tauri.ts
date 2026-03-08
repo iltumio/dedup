@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 export interface DirEntry {
 	name: string;
@@ -25,6 +26,15 @@ export interface ScanStats {
 	total_stored_bytes: number;
 }
 
+export interface ScanProgress {
+	files_processed: number;
+	dirs_processed: number;
+	bytes_processed: number;
+	bytes_stored: number;
+	duplicates_found: number;
+	current_file: string;
+}
+
 export async function listDir(path: string): Promise<DirEntry[]> {
 	return invoke('list_dir', { path });
 }
@@ -41,12 +51,22 @@ export async function findDuplicates(path: string): Promise<string[]> {
 	return invoke('find_duplicates', { path });
 }
 
-export async function scanDirectory(source: string, storePath: string): Promise<ScanStats> {
-	return invoke('scan_directory', { source, storePath });
+export async function scanDirectory(
+	source: string,
+	storePath: string,
+	targetPath: string
+): Promise<ScanStats> {
+	return invoke('scan_directory', { source, storePath, targetPath });
 }
 
 export async function findAllDuplicates(): Promise<[string, string[]][]> {
 	return invoke('find_all_duplicates');
+}
+
+export function onScanProgress(callback: (progress: ScanProgress) => void): Promise<UnlistenFn> {
+	return listen<ScanProgress>('scan-progress', (event) => {
+		callback(event.payload);
+	});
 }
 
 export function formatSize(bytes: number): string {

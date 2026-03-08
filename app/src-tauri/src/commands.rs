@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use dedup_core::{DirEntry, FileMetadata, ScanStats, Store};
-use tauri::State;
+use dedup_core::{DirEntry, FileMetadata, ScanProgress, ScanStats, Store};
+use tauri::{AppHandle, Emitter, State};
 
 /// Shared application state holding the current store.
 pub struct AppState {
@@ -90,29 +90,58 @@ pub fn find_all_duplicates(
     store.find_all_duplicates().map_err(|e| e.to_string())
 }
 
+/// Scan a source directory into the store, optionally under a target virtual path.
+///
+/// - `source`: absolute path to the directory to scan
+/// - `store_path`: path to the .store directory
+/// - `target_path`: virtual path to place content under (e.g. "/photos/vacation", or "/" for root)
+///
+/// Emits `scan-progress` events via the app handle for real-time UI updates.
+/// Existing store content is preserved (incremental).
 #[tauri::command]
 pub fn scan_directory(
+    app: AppHandle,
     state: State<'_, AppState>,
     source: String,
     store_path: String,
+    target_path: String,
 ) -> Result<ScanStats, String> {
     let store_path = PathBuf::from(&store_path);
-
-    // Open or create the store at the specified path
-    let new_store = Store::open(&store_path).map_err(|e| e.to_string())?;
-
     let source_path = PathBuf::from(&source);
-    let stats = new_store.scan(&source_path).map_err(|e| e.to_string())?;
 
-    // Update shared state
+    // Reuse existing store if same path, otherwise open new
+    {
+        let current_store_path = state.store_path.lock().map_err(|e| e.to_string())?;
+        let mut store_guard = state.store.lock().map_err(|e| e.to_string())?;
+
+        if store_guard.is_none() || *current_store_path != store_path {
+            *store_guard = Some(Store::open(&store_path).map_err(|e| e.to_string())?);
+        }
+    }
+
+    // Update the stored path
     {
         let mut sp = state.store_path.lock().map_err(|e| e.to_string())?;
         *sp = store_path;
     }
-    {
-        let mut store = state.store.lock().map_err(|e| e.to_string())?;
-        *store = Some(new_store);
-    }
+
+    // Run scan with progress callback
+    let store_guard = state.store.lock().map_err(|e| e.to_string())?;
+    let store = store_guard
+        .as_ref()
+        .ok_or_else(|| "Failed to open store.".to_string())?;
+
+    let app_clone = app.clone();
+    let stats = store
+        .scan_into(
+            &source_path,
+            &target_path,
+            move |progress: &ScanProgress| {
+                // Emit progress event — ignore errors (UI might not be listening)
+                let _ = app_clone.emit("scan-progress", progress.clone());
+            },
+        )
+        .map_err(|e| e.to_string())?;
 
     Ok(stats)
 }

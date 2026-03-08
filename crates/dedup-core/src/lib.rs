@@ -14,7 +14,7 @@ pub mod types;
 
 pub use content_store::ContentStore;
 pub use metadata::MetadataDb;
-pub use types::{DirEntry, DirMetadata, FileMetadata, ScanStats};
+pub use types::{DirEntry, DirMetadata, FileMetadata, ScanProgress, ScanStats};
 
 use std::path::Path;
 
@@ -46,9 +46,21 @@ impl Store {
         Ok(Self { content, metadata })
     }
 
-    /// Scan a source directory and replicate it into this store.
+    /// Scan a source directory and replicate it into this store under `/`.
     pub fn scan(&self, source: &Path) -> Result<ScanStats> {
         scanner::scan_directory(source, &self.content, &self.metadata)
+    }
+
+    /// Scan a source directory into a target virtual path (incremental).
+    ///
+    /// Existing entries in the store are preserved. New entries are added
+    /// under `target_path`. The `on_progress` callback is invoked after
+    /// each file is processed.
+    pub fn scan_into<F>(&self, source: &Path, target_path: &str, on_progress: F) -> Result<ScanStats>
+    where
+        F: Fn(&types::ScanProgress),
+    {
+        scanner::scan_directory_into(source, target_path, &self.content, &self.metadata, on_progress)
     }
 
     /// List entries in a virtual directory.

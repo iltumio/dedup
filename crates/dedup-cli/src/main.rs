@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -23,6 +24,11 @@ enum Commands {
         /// Store directory (will be created if it doesn't exist).
         #[arg(short = 'o', long, default_value = ".store")]
         store: PathBuf,
+
+        /// Virtual path to place content under (e.g. "/photos/vacation").
+        /// Defaults to "/" (root). Existing content is preserved.
+        #[arg(short, long, default_value = "/")]
+        target: String,
     },
 
     /// List contents of a virtual directory in the store.
@@ -72,7 +78,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan { source, store } => cmd_scan(&source, &store),
+        Commands::Scan { source, store, target } => cmd_scan(&source, &store, &target),
         Commands::Ls { path, store } => cmd_ls(&path, &store),
         Commands::Info { path, store } => cmd_info(&path, &store),
         Commands::Duplicates { store } => cmd_duplicates(&store),
@@ -84,34 +90,52 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_scan(source: &PathBuf, store_path: &PathBuf) -> Result<()> {
+fn cmd_scan(source: &PathBuf, store_path: &PathBuf, target: &str) -> Result<()> {
     println!("Scanning: {}", source.display());
     println!("Store:    {}", store_path.display());
+    println!("Target:   {target}");
     println!();
 
     let store = Store::open(store_path).context("failed to open store")?;
-    let stats = store.scan(source).context("scan failed")?;
 
+    let last_file = std::sync::Mutex::new(String::new());
+    let files_count = AtomicU64::new(0);
+
+    let stats = store.scan_into(source, target, |progress| {
+        files_count.store(progress.files_processed, Ordering::Relaxed);
+        if let Ok(mut lf) = last_file.lock() {
+            *lf = progress.current_file.clone();
+        }
+        // Print progress every 100 files
+        if progress.files_processed % 100 == 0 || progress.files_processed == 1 {
+            eprint!(
+                "\r  Processed {} files ({})...",
+                progress.files_processed,
+                format_size(progress.bytes_processed)
+            );
+        }
+    }).context("scan failed")?;
+
+    eprintln!("\r                                                    ");
     println!("Scan complete!");
     println!("  Files:           {}", stats.total_files);
     println!("  Directories:     {}", stats.total_dirs);
     println!("  Unique blobs:    {}", stats.unique_blobs);
     println!("  Duplicate files: {}", stats.duplicate_files);
     println!(
-        "  Original size:   {} bytes ({:.2} MB)",
-        stats.total_original_bytes,
-        stats.total_original_bytes as f64 / 1_048_576.0
+        "  Original size:   {}",
+        format_size(stats.total_original_bytes)
     );
     println!(
-        "  Stored size:     {} bytes ({:.2} MB)",
-        stats.total_stored_bytes,
-        stats.total_stored_bytes as f64 / 1_048_576.0
+        "  Stored size:     {}",
+        format_size(stats.total_stored_bytes)
     );
 
     if stats.total_original_bytes > 0 {
+        let saved_bytes = stats.total_original_bytes.saturating_sub(stats.total_stored_bytes);
         let ratio = stats.total_stored_bytes as f64 / stats.total_original_bytes as f64;
-        let saved = 1.0 - ratio;
-        println!("  Space saved:     {:.1}%", saved * 100.0);
+        let saved_pct = (1.0 - ratio) * 100.0;
+        println!("  Space saved:     {} ({:.1}%)", format_size(saved_bytes), saved_pct);
     }
 
     Ok(())

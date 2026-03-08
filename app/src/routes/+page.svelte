@@ -1,42 +1,78 @@
 <script lang="ts">
 	import FileTree from '$lib/components/FileTree.svelte';
 	import FileDetails from '$lib/components/FileDetails.svelte';
-	import { scanDirectory, findAllDuplicates, formatSize, type DirEntry, type ScanStats } from '$lib/api/tauri';
+	import {
+		scanDirectory,
+		onScanProgress,
+		formatSize,
+		type DirEntry,
+		type ScanStats,
+		type ScanProgress
+	} from '$lib/api/tauri';
+	import type { UnlistenFn } from '@tauri-apps/api/event';
 
 	let selectedPath = $state<string | null>(null);
 	let selectedEntry = $state<DirEntry | null>(null);
 	let scanSource = $state('');
 	let storePath = $state('.store');
+	let targetPath = $state('/');
 	let scanning = $state(false);
 	let scanResult = $state<ScanStats | null>(null);
 	let scanError = $state<string | null>(null);
 	let showScanDialog = $state(false);
+	let progress = $state<ScanProgress | null>(null);
+	let treeRefreshKey = $state(0);
 
 	function handleSelect(path: string, entry: DirEntry) {
 		selectedPath = path;
 		selectedEntry = entry;
 	}
 
+	function openScanDialog(presetTarget?: string) {
+		targetPath = presetTarget ?? '/';
+		scanError = null;
+		progress = null;
+		showScanDialog = true;
+	}
+
 	async function handleScan() {
 		if (!scanSource.trim()) return;
 		scanning = true;
 		scanError = null;
-		scanResult = null;
+		progress = null;
+
+		let unlisten: UnlistenFn | null = null;
 
 		try {
-			scanResult = await scanDirectory(scanSource, storePath);
+			unlisten = await onScanProgress((p) => {
+				progress = p;
+			});
+
+			scanResult = await scanDirectory(scanSource, storePath, targetPath);
 			showScanDialog = false;
+			treeRefreshKey++;
 		} catch (e) {
 			scanError = String(e);
+		} finally {
+			unlisten?.();
+			scanning = false;
 		}
-		scanning = false;
 	}
+
+	let savedBytes = $derived(
+		scanResult ? scanResult.total_original_bytes - scanResult.total_stored_bytes : 0
+	);
+	let savedPct = $derived(
+		scanResult && scanResult.total_original_bytes > 0
+			? ((1 - scanResult.total_stored_bytes / scanResult.total_original_bytes) * 100).toFixed(1)
+			: '0.0'
+	);
 </script>
 
 <div class="app">
 	<header class="toolbar">
 		<h1 class="logo">dedup</h1>
-		<button class="scan-btn" onclick={() => (showScanDialog = !showScanDialog)}>
+		<button class="scan-btn" onclick={() => openScanDialog()}>
 			Scan Directory
 		</button>
 		{#if scanResult}
@@ -47,13 +83,13 @@
 				<span class="sep">·</span>
 				<span class="highlight">{scanResult.duplicate_files} duplicates</span>
 				<span class="sep">·</span>
-				<span>saved {((1 - scanResult.total_stored_bytes / scanResult.total_original_bytes) * 100).toFixed(1)}%</span>
+				<span class="saved">saved {formatSize(savedBytes)} ({savedPct}%)</span>
 			</div>
 		{/if}
 	</header>
 
 	{#if showScanDialog}
-		<div class="scan-dialog">
+		<div class="scan-dialog" role="dialog">
 			<div class="dialog-content">
 				<h2>Scan Directory</h2>
 				<label>
@@ -62,17 +98,77 @@
 						type="text"
 						bind:value={scanSource}
 						placeholder="/path/to/directory"
+						disabled={scanning}
 					/>
 				</label>
 				<label>
-					<span>Store location</span>
-					<input type="text" bind:value={storePath} />
+					<span>Place content under (virtual path)</span>
+					<input
+						type="text"
+						bind:value={targetPath}
+						placeholder="/"
+						disabled={scanning}
+					/>
+					<span class="hint">Use "/" for root, or e.g. "/photos/vacation" to nest</span>
 				</label>
+				<label>
+					<span>Store location</span>
+					<input type="text" bind:value={storePath} disabled={scanning} />
+				</label>
+
+				{#if scanning && progress}
+					<div class="progress-section">
+						<div class="progress-bar-track">
+							<div class="progress-bar-fill" style="width: 100%"></div>
+							<!-- indeterminate since we don't know total files in advance -->
+						</div>
+						<div class="progress-stats">
+							<div class="stat-row">
+								<span class="stat-label">Files</span>
+								<span class="stat-value">{progress.files_processed}</span>
+							</div>
+							<div class="stat-row">
+								<span class="stat-label">Processed</span>
+								<span class="stat-value">{formatSize(progress.bytes_processed)}</span>
+							</div>
+							<div class="stat-row">
+								<span class="stat-label">Stored</span>
+								<span class="stat-value">{formatSize(progress.bytes_stored)}</span>
+							</div>
+							<div class="stat-row">
+								<span class="stat-label">Duplicates</span>
+								<span class="stat-value highlight">{progress.duplicates_found}</span>
+							</div>
+							{#if progress.bytes_processed > 0}
+								<div class="stat-row">
+									<span class="stat-label">Space saved</span>
+									<span class="stat-value saved">
+										{formatSize(progress.bytes_processed - progress.bytes_stored)}
+									</span>
+								</div>
+							{/if}
+						</div>
+						<div class="current-file" title={progress.current_file}>
+							{progress.current_file}
+						</div>
+					</div>
+				{:else if scanning}
+					<div class="progress-section">
+						<div class="progress-bar-track">
+							<div class="progress-bar-fill indeterminate"></div>
+						</div>
+						<div class="current-file">Starting scan...</div>
+					</div>
+				{/if}
+
 				{#if scanError}
 					<div class="error">{scanError}</div>
 				{/if}
+
 				<div class="dialog-actions">
-					<button class="cancel" onclick={() => (showScanDialog = false)}>Cancel</button>
+					<button class="cancel" onclick={() => (showScanDialog = false)} disabled={scanning}>
+						Cancel
+					</button>
 					<button class="primary" onclick={handleScan} disabled={scanning}>
 						{scanning ? 'Scanning...' : 'Start Scan'}
 					</button>
@@ -83,7 +179,9 @@
 
 	<main class="content">
 		<aside class="sidebar">
-			<FileTree {selectedPath} onSelect={handleSelect} />
+			{#key treeRefreshKey}
+				<FileTree {selectedPath} onSelect={handleSelect} onScanInto={openScanDialog} />
+			{/key}
 		</aside>
 		<section class="details">
 			{#if selectedPath && selectedEntry}
@@ -146,6 +244,11 @@
 		font-weight: 600;
 	}
 
+	.scan-stats .saved {
+		color: var(--success);
+		font-weight: 600;
+	}
+
 	.sep {
 		opacity: 0.4;
 	}
@@ -176,6 +279,7 @@
 		font-size: 14px;
 	}
 
+	/* Dialog */
 	.scan-dialog {
 		position: fixed;
 		inset: 0;
@@ -191,10 +295,10 @@
 		border: 1px solid var(--border);
 		border-radius: 12px;
 		padding: 24px;
-		width: 400px;
+		width: 480px;
 		display: flex;
 		flex-direction: column;
-		gap: 16px;
+		gap: 14px;
 	}
 
 	.dialog-content h2 {
@@ -213,6 +317,11 @@
 		color: var(--text-muted);
 	}
 
+	.hint {
+		font-size: 11px !important;
+		opacity: 0.6;
+	}
+
 	.dialog-content input {
 		background: var(--bg);
 		border: 1px solid var(--border);
@@ -225,6 +334,85 @@
 	.dialog-content input:focus {
 		outline: none;
 		border-color: var(--accent-light);
+	}
+
+	.dialog-content input:disabled {
+		opacity: 0.5;
+	}
+
+	/* Progress */
+	.progress-section {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		padding: 12px;
+		background: var(--bg);
+		border-radius: 8px;
+		border: 1px solid var(--border);
+	}
+
+	.progress-bar-track {
+		height: 6px;
+		background: var(--border);
+		border-radius: 3px;
+		overflow: hidden;
+	}
+
+	.progress-bar-fill {
+		height: 100%;
+		background: var(--accent-light);
+		border-radius: 3px;
+		transition: width 0.3s;
+	}
+
+	.progress-bar-fill.indeterminate {
+		width: 30% !important;
+		animation: indeterminate 1.5s infinite ease-in-out;
+	}
+
+	@keyframes indeterminate {
+		0% { transform: translateX(-100%); }
+		100% { transform: translateX(400%); }
+	}
+
+	.progress-stats {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 4px 16px;
+	}
+
+	.stat-row {
+		display: flex;
+		justify-content: space-between;
+		font-size: 12px;
+	}
+
+	.stat-label {
+		color: var(--text-muted);
+	}
+
+	.stat-value {
+		font-family: var(--font-mono);
+		font-size: 11px;
+	}
+
+	.stat-value.highlight {
+		color: var(--duplicate);
+		font-weight: 600;
+	}
+
+	.stat-value.saved {
+		color: var(--success);
+		font-weight: 600;
+	}
+
+	.current-file {
+		font-size: 11px;
+		color: var(--text-muted);
+		font-family: var(--font-mono);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.dialog-actions {
