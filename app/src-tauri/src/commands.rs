@@ -67,6 +67,33 @@ pub fn read_file(state: State<'_, AppState>, path: String) -> Result<Vec<u8>, St
 }
 
 #[tauri::command]
+pub fn open_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    state.ensure_store()?;
+    let store_guard = state.store.lock().map_err(|e| e.to_string())?;
+    let store = store_guard
+        .as_ref()
+        .ok_or_else(|| "No store loaded.".to_string())?;
+
+    let data = store.read_file(&path).map_err(|e| e.to_string())?;
+
+    // Extract the original filename from the virtual path
+    let filename = path
+        .rsplit('/')
+        .next()
+        .unwrap_or("file");
+
+    // Write to a temp file preserving the original name so the OS picks the right app
+    let tmp_dir = std::env::temp_dir().join("dedup-preview");
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    let tmp_path = tmp_dir.join(filename);
+    std::fs::write(&tmp_path, &data).map_err(|e| e.to_string())?;
+
+    open::that(&tmp_path).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
 pub fn find_duplicates(state: State<'_, AppState>, path: String) -> Result<Vec<String>, String> {
     state.ensure_store()?;
     let store_guard = state.store.lock().map_err(|e| e.to_string())?;

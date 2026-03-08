@@ -19,6 +19,7 @@ fn main() {
             commands::find_duplicates,
             commands::find_all_duplicates,
             commands::scan_directory,
+            commands::open_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dedup app");

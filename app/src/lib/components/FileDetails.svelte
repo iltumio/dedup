@@ -2,6 +2,8 @@
 	import {
 		getFileMetadata,
 		findDuplicates,
+		readFile,
+		openFile,
 		formatSize,
 		formatTimestamp,
 		type FileMetadata,
@@ -19,15 +21,64 @@
 	let duplicates = $state<string[]>([]);
 	let cidString = $state('');
 	let loading = $state(false);
+	let previewUrl = $state<string | null>(null);
+
+	const IMAGE_EXTENSIONS = new Set([
+		'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg', 'avif', 'tiff', 'tif'
+	]);
+
+	function getExtension(name: string): string {
+		const dot = name.lastIndexOf('.');
+		if (dot === -1) return '';
+		return name.slice(dot + 1).toLowerCase();
+	}
+
+	function getMimeType(ext: string): string {
+		const map: Record<string, string> = {
+			png: 'image/png',
+			jpg: 'image/jpeg',
+			jpeg: 'image/jpeg',
+			gif: 'image/gif',
+			webp: 'image/webp',
+			bmp: 'image/bmp',
+			ico: 'image/x-icon',
+			svg: 'image/svg+xml',
+			avif: 'image/avif',
+			tiff: 'image/tiff',
+			tif: 'image/tiff'
+		};
+		return map[ext] ?? 'application/octet-stream';
+	}
+
+	let isImage = $derived(IMAGE_EXTENSIONS.has(getExtension(entry.name)));
+
+	let opening = $state(false);
+
+	async function handleOpen() {
+		opening = true;
+		try {
+			await openFile(path);
+		} catch (e) {
+			console.error('Failed to open file:', e);
+		}
+		opening = false;
+	}
 
 	$effect(() => {
 		loadDetails(path);
+		return () => {
+			if (previewUrl) {
+				URL.revokeObjectURL(previewUrl);
+				previewUrl = null;
+			}
+		};
 	});
 
 	async function loadDetails(p: string) {
 		if (entry.is_dir) {
 			metadata = null;
 			duplicates = [];
+			previewUrl = null;
 			return;
 		}
 
@@ -42,6 +93,22 @@
 				if (cidString.length > 24) {
 					cidString = cidString.slice(0, 12) + '...' + cidString.slice(-12);
 				}
+			}
+
+			// Load image preview
+			const ext = getExtension(entry.name);
+			if (IMAGE_EXTENSIONS.has(ext)) {
+				try {
+					const bytes = await readFile(p);
+					const blob = new Blob([new Uint8Array(bytes)], { type: getMimeType(ext) });
+					if (previewUrl) URL.revokeObjectURL(previewUrl);
+					previewUrl = URL.createObjectURL(blob);
+				} catch (e) {
+					console.error('Failed to load image preview:', e);
+					previewUrl = null;
+				}
+			} else {
+				previewUrl = null;
 			}
 		} catch (e) {
 			console.error('Failed to load details:', e);
@@ -60,6 +127,22 @@
 			<span class="icon">{entry.is_dir ? '📁' : '📄'}</span>
 			<span class="path">{path}</span>
 		</div>
+
+		{#if !entry.is_dir}
+			<button class="open-btn" onclick={handleOpen} disabled={opening}>
+				{opening ? 'Opening...' : 'Open'}
+			</button>
+		{/if}
+
+		{#if isImage && previewUrl}
+			<div class="image-preview">
+				<img src={previewUrl} alt={entry.name} />
+			</div>
+		{:else if isImage && loading}
+			<div class="image-preview placeholder-img">
+				<span>Loading preview...</span>
+			</div>
+		{/if}
 
 		{#if entry.is_dir}
 			<div class="info-row">
@@ -219,5 +302,54 @@
 	.dup-list li.current {
 		color: var(--text);
 		font-weight: 600;
+	}
+
+	.image-preview {
+		margin-bottom: 16px;
+		padding-bottom: 12px;
+		border-bottom: 1px solid var(--border);
+		display: flex;
+		justify-content: center;
+		align-items: center;
+		background: var(--bg);
+		border-radius: 8px;
+		overflow: hidden;
+		min-height: 80px;
+	}
+
+	.image-preview img {
+		max-width: 100%;
+		max-height: 400px;
+		object-fit: contain;
+		display: block;
+	}
+
+	.image-preview.placeholder-img {
+		height: 120px;
+		color: var(--text-muted);
+		font-size: 12px;
+	}
+
+	.open-btn {
+		width: 100%;
+		padding: 8px 14px;
+		margin-bottom: 16px;
+		background: var(--accent);
+		border-radius: 6px;
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+		border: none;
+		color: var(--text);
+		transition: background 0.15s;
+	}
+
+	.open-btn:hover {
+		background: var(--accent-light);
+	}
+
+	.open-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 </style>
