@@ -1,0 +1,15 @@
+# Rust
+/target/
+Cargo.lock
+
+# Node
+app/node_modules/
+app/.svelte-kit/
+app/build/
+
+# Store data
+.store/
+
+# OS
+.DS_Store
+Thumbs.db

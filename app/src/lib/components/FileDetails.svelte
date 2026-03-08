@@ -1,0 +1,223 @@
+<script lang="ts">
+	import {
+		getFileMetadata,
+		findDuplicates,
+		formatSize,
+		formatTimestamp,
+		type FileMetadata,
+		type DirEntry
+	} from '$lib/api/tauri';
+
+	interface Props {
+		path: string;
+		entry: DirEntry;
+	}
+
+	let { path, entry }: Props = $props();
+
+	let metadata = $state<FileMetadata | null>(null);
+	let duplicates = $state<string[]>([]);
+	let cidString = $state('');
+	let loading = $state(false);
+
+	$effect(() => {
+		loadDetails(path);
+	});
+
+	async function loadDetails(p: string) {
+		if (entry.is_dir) {
+			metadata = null;
+			duplicates = [];
+			return;
+		}
+
+		loading = true;
+		try {
+			metadata = await getFileMetadata(p);
+			duplicates = await findDuplicates(p);
+
+			// Convert CID bytes to hex for display
+			if (metadata?.cid) {
+				cidString = metadata.cid.map((b) => b.toString(16).padStart(2, '0')).join('');
+				if (cidString.length > 24) {
+					cidString = cidString.slice(0, 12) + '...' + cidString.slice(-12);
+				}
+			}
+		} catch (e) {
+			console.error('Failed to load details:', e);
+		}
+		loading = false;
+	}
+</script>
+
+<div class="file-details">
+	<div class="header">
+		<span class="title">Details</span>
+	</div>
+
+	<div class="content">
+		<div class="path-display">
+			<span class="icon">{entry.is_dir ? '📁' : '📄'}</span>
+			<span class="path">{path}</span>
+		</div>
+
+		{#if entry.is_dir}
+			<div class="info-row">
+				<span class="label">Type</span>
+				<span class="value">Directory</span>
+			</div>
+		{:else if loading}
+			<div class="loading">Loading...</div>
+		{:else if metadata}
+			<div class="info-grid">
+				<div class="info-row">
+					<span class="label">Size</span>
+					<span class="value">{formatSize(metadata.original_size)}</span>
+				</div>
+				<div class="info-row">
+					<span class="label">Stored</span>
+					<span class="value">{formatSize(metadata.compressed_size)}</span>
+				</div>
+				{#if metadata.original_size > 0}
+					<div class="info-row">
+						<span class="label">Ratio</span>
+						<span class="value">
+							{((metadata.compressed_size / metadata.original_size) * 100).toFixed(1)}%
+						</span>
+					</div>
+				{/if}
+				<div class="info-row">
+					<span class="label">Modified</span>
+					<span class="value">{formatTimestamp(metadata.modified)}</span>
+				</div>
+				<div class="info-row">
+					<span class="label">CID</span>
+					<span class="value mono">{cidString}</span>
+				</div>
+			</div>
+
+			{#if duplicates.length > 1}
+				<div class="duplicates">
+					<div class="dup-header">
+						<span class="dup-icon">⚠</span>
+						<span>{duplicates.length} copies of this file</span>
+					</div>
+					<ul class="dup-list">
+						{#each duplicates as dup}
+							<li class:current={dup === path}>{dup}</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
+		{/if}
+	</div>
+</div>
+
+<style>
+	.file-details {
+		height: 100%;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+	}
+
+	.header {
+		padding: 12px 16px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.title {
+		font-weight: 600;
+		font-size: 14px;
+	}
+
+	.content {
+		flex: 1;
+		overflow-y: auto;
+		padding: 16px;
+	}
+
+	.path-display {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-bottom: 16px;
+		padding-bottom: 12px;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.path-display .icon {
+		font-size: 20px;
+	}
+
+	.path-display .path {
+		font-family: var(--font-mono);
+		font-size: 13px;
+		word-break: break-all;
+	}
+
+	.info-grid {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.info-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		font-size: 13px;
+	}
+
+	.label {
+		color: var(--text-muted);
+	}
+
+	.value {
+		font-family: var(--font-mono);
+		font-size: 12px;
+	}
+
+	.mono {
+		font-family: var(--font-mono);
+	}
+
+	.loading {
+		color: var(--text-muted);
+		font-size: 13px;
+	}
+
+	.duplicates {
+		margin-top: 16px;
+		padding: 12px;
+		background: rgba(239, 83, 80, 0.1);
+		border: 1px solid rgba(239, 83, 80, 0.3);
+		border-radius: 6px;
+	}
+
+	.dup-header {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--duplicate);
+		margin-bottom: 8px;
+	}
+
+	.dup-list {
+		list-style: none;
+		font-size: 12px;
+		font-family: var(--font-mono);
+	}
+
+	.dup-list li {
+		padding: 3px 0;
+		color: var(--text-muted);
+	}
+
+	.dup-list li.current {
+		color: var(--text);
+		font-weight: 600;
+	}
+</style>
