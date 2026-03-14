@@ -57,14 +57,27 @@ export async function findDuplicates(path: string): Promise<string[]> {
 
 export async function scanDirectory(
 	source: string,
-	storePath: string,
 	targetPath: string
 ): Promise<ScanStats> {
-	return invoke('scan_directory', { source, storePath, targetPath });
+	return invoke('scan_directory', { source, targetPath });
 }
 
 export async function findAllDuplicates(): Promise<[string, string[]][]> {
 	return invoke('find_all_duplicates');
+}
+
+export interface ExtensionStats {
+	extension: string;
+	total_files: number;
+	duplicate_files: number;
+	duplicate_pct: number;
+	total_original_bytes: number;
+	total_stored_bytes: number;
+	bytes_saved: number;
+}
+
+export async function getExtensionStats(): Promise<ExtensionStats[]> {
+	return invoke('get_extension_stats');
 }
 
 export function onScanProgress(callback: (progress: ScanProgress) => void): Promise<UnlistenFn> {
@@ -83,4 +96,59 @@ export function formatSize(bytes: number): string {
 export function formatTimestamp(ts: number): string {
 	if (ts === 0) return '—';
 	return new Date(ts * 1000).toLocaleString();
+}
+
+// ── Workspace types ──────────────────────────────────────
+
+export interface WorkspaceStats {
+	total_files: number;
+	total_dirs: number;
+	unique_blobs: number;
+	duplicate_files: number;
+	total_original_bytes: number;
+	total_stored_bytes: number;
+	scans_count: number;
+	last_scan_at: number;
+}
+
+export interface Workspace {
+	id: string;
+	label: string;
+	tags: string[];
+	store_path: string;
+	created_at: number;
+	stats: WorkspaceStats;
+}
+
+export interface WorkspacesConfig {
+	workspaces: Workspace[];
+	active_workspace_id: string | null;
+}
+
+export async function listWorkspaces(): Promise<WorkspacesConfig> {
+	return invoke('list_workspaces');
+}
+
+export async function createWorkspace(
+	label: string,
+	tags: string[],
+	storePath: string
+): Promise<Workspace> {
+	return invoke('create_workspace', { label, tags, storePath });
+}
+
+export async function switchWorkspace(workspaceId: string): Promise<Workspace> {
+	return invoke('switch_workspace', { workspaceId });
+}
+
+export async function deleteWorkspace(workspaceId: string): Promise<void> {
+	return invoke('delete_workspace', { workspaceId });
+}
+
+export async function exportWorkspaces(): Promise<string> {
+	return invoke('export_workspaces');
+}
+
+export async function importWorkspaces(json: string): Promise<WorkspacesConfig> {
+	return invoke('import_workspaces', { json });
 }

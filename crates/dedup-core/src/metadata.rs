@@ -2,10 +2,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use redb::{
-    Database, MultimapTableDefinition, ReadableMultimapTable, TableDefinition,
+    Database, MultimapTableDefinition, ReadableMultimapTable, ReadableTable, TableDefinition,
 };
 
-use crate::types::{DirEntry, DirMetadata, FileMetadata};
+use crate::types::{DirEntry, DirMetadata, ExtensionStats, FileMetadata};
 
 /// path (e.g. "/vacation/img1.jpg") → bincode-serialized FileMetadata
 const PATHS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("paths");
@@ -215,6 +215,109 @@ impl MetadataDb {
         }
 
         Ok(groups)
+    }
+
+    /// Compute per-extension statistics across all files in the store.
+    ///
+    /// For each extension, computes total files, duplicate count,
+    /// duplicate percentage, total bytes, stored bytes, and bytes saved.
+    pub fn extension_stats(&self) -> Result<Vec<ExtensionStats>> {
+        use std::collections::HashMap;
+
+        let read_txn = self.db.begin_read()?;
+        let paths_table = read_txn.open_table(PATHS_TABLE)?;
+        let cid_paths = read_txn.open_multimap_table(CID_PATHS_TABLE)?;
+
+        // First pass: build a CID → count map for detecting duplicates
+        let mut cid_count: HashMap<String, u64> = HashMap::new();
+        {
+            let iter = cid_paths.iter()?;
+            for item in iter {
+                let (key, values) = item?;
+                let cid_str = key.value().to_string();
+                let mut count = 0u64;
+                for v in values {
+                    v?;
+                    count += 1;
+                }
+                cid_count.insert(cid_str, count);
+            }
+        }
+
+        // Per-extension accumulator
+        struct ExtAcc {
+            total_files: u64,
+            duplicate_files: u64,
+            total_original_bytes: u64,
+            total_stored_bytes: u64,
+        }
+
+        let mut ext_map: HashMap<String, ExtAcc> = HashMap::new();
+
+        // Second pass: iterate all files
+        let range = paths_table.iter()?;
+        for item in range {
+            let item = item?;
+            let path: &str = item.0.value();
+            let meta: FileMetadata = bincode::deserialize(item.1.value())
+                .context("failed to deserialize FileMetadata")?;
+
+            // Extract extension
+            let ext: String = path
+                .rsplit('/')
+                .next()
+                .and_then(|name: &str| {
+                    let dot = name.rfind('.')?;
+                    Some(name[dot + 1..].to_lowercase())
+                })
+                .unwrap_or_default();
+
+            // Check if this file's CID has duplicates
+            let cid_str = crate::cid::cid_to_string(
+                &crate::cid::cid_from_bytes(&meta.cid)?,
+            );
+            let is_dup = cid_count.get(&cid_str).copied().unwrap_or(1) > 1;
+
+            let acc = ext_map.entry(ext).or_insert(ExtAcc {
+                total_files: 0,
+                duplicate_files: 0,
+                total_original_bytes: 0,
+                total_stored_bytes: 0,
+            });
+
+            acc.total_files += 1;
+            acc.total_original_bytes += meta.original_size;
+            acc.total_stored_bytes += meta.compressed_size;
+            if is_dup {
+                acc.duplicate_files += 1;
+            }
+        }
+
+        // Convert to result vec
+        let mut result: Vec<ExtensionStats> = ext_map
+            .into_iter()
+            .map(|(ext, acc)| {
+                let dup_pct = if acc.total_files > 0 {
+                    (acc.duplicate_files as f64 / acc.total_files as f64) * 100.0
+                } else {
+                    0.0
+                };
+                ExtensionStats {
+                    extension: if ext.is_empty() { "(no ext)".into() } else { ext },
+                    total_files: acc.total_files,
+                    duplicate_files: acc.duplicate_files,
+                    duplicate_pct: (dup_pct * 10.0).round() / 10.0,
+                    total_original_bytes: acc.total_original_bytes,
+                    total_stored_bytes: acc.total_stored_bytes,
+                    bytes_saved: acc.total_original_bytes.saturating_sub(acc.total_stored_bytes),
+                }
+            })
+            .collect();
+
+        // Sort by bytes_saved descending (biggest savers first)
+        result.sort_by(|a, b| b.bytes_saved.cmp(&a.bytes_saved));
+
+        Ok(result)
     }
 }
 

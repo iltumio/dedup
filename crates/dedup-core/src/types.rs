@@ -91,3 +91,22 @@ pub struct ScanProgress {
     /// Name of the file currently being processed.
     pub current_file: String,
 }
+
+/// Per-extension statistics for analytics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionStats {
+    /// File extension (lowercase, without dot). Empty string for no extension.
+    pub extension: String,
+    /// Total number of files with this extension.
+    pub total_files: u64,
+    /// Number of files that are duplicates (share CID with another file).
+    pub duplicate_files: u64,
+    /// Percentage of files with this extension that are duplicates.
+    pub duplicate_pct: f64,
+    /// Total original bytes across all files with this extension.
+    pub total_original_bytes: u64,
+    /// Total stored bytes (compressed, deduplicated) for this extension.
+    pub total_stored_bytes: u64,
+    /// Bytes saved by deduplication + compression for this extension.
+    pub bytes_saved: u64,
+}

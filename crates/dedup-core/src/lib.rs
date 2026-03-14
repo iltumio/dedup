@@ -14,7 +14,7 @@ pub mod types;
 
 pub use content_store::ContentStore;
 pub use metadata::MetadataDb;
-pub use types::{DirEntry, DirMetadata, FileMetadata, ScanProgress, ScanStats};
+pub use types::{DirEntry, DirMetadata, ExtensionStats, FileMetadata, ScanProgress, ScanStats};
 
 use std::path::Path;
 
@@ -105,5 +105,10 @@ impl Store {
     /// Find all groups of duplicate files in the store.
     pub fn find_all_duplicates(&self) -> Result<Vec<(String, Vec<String>)>> {
         self.metadata.find_all_duplicates()
+    }
+
+    /// Compute per-extension statistics across all files.
+    pub fn extension_stats(&self) -> Result<Vec<ExtensionStats>> {
+        self.metadata.extension_stats()
     }
 }

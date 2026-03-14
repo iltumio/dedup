@@ -1,20 +1,32 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use dedup_core::{DirEntry, FileMetadata, ScanProgress, ScanStats, Store};
+use dedup_core::{DirEntry, ExtensionStats, FileMetadata, ScanProgress, ScanStats, Store};
 use tauri::{AppHandle, Emitter, State};
 
-/// Shared application state holding the current store.
+use crate::workspace::{self, Workspace, WorkspacesConfig};
+
+/// Shared application state holding the current store and workspaces.
 pub struct AppState {
     pub store: Mutex<Option<Store>>,
     pub store_path: Mutex<PathBuf>,
+    pub workspaces: Mutex<WorkspacesConfig>,
+    pub config_path: PathBuf,
 }
 
 impl AppState {
-    pub fn new(default_store: PathBuf) -> Self {
+    pub fn new(config_path: PathBuf) -> Self {
+        let config = WorkspacesConfig::load(&config_path).unwrap_or_default();
+        let initial_store_path = config
+            .active()
+            .map(|w| PathBuf::from(&w.store_path))
+            .unwrap_or_else(|| PathBuf::from(".store"));
+
         Self {
             store: Mutex::new(None),
-            store_path: Mutex::new(default_store),
+            store_path: Mutex::new(initial_store_path),
+            workspaces: Mutex::new(config),
+            config_path,
         }
     }
 
@@ -27,6 +39,11 @@ impl AppState {
             }
         }
         Ok(())
+    }
+
+    fn save_config(&self) -> Result<(), String> {
+        let config = self.workspaces.lock().map_err(|e| e.to_string())?;
+        config.save(&self.config_path)
     }
 }
 
@@ -117,10 +134,20 @@ pub fn find_all_duplicates(
     store.find_all_duplicates().map_err(|e| e.to_string())
 }
 
-/// Scan a source directory into the store, optionally under a target virtual path.
+#[tauri::command]
+pub fn get_extension_stats(state: State<'_, AppState>) -> Result<Vec<ExtensionStats>, String> {
+    state.ensure_store()?;
+    let store_guard = state.store.lock().map_err(|e| e.to_string())?;
+    let store = store_guard
+        .as_ref()
+        .ok_or_else(|| "No store loaded.".to_string())?;
+
+    store.extension_stats().map_err(|e| e.to_string())
+}
+
+/// Scan a source directory into the active workspace's store.
 ///
 /// - `source`: absolute path to the directory to scan
-/// - `store_path`: path to the .store directory
 /// - `target_path`: virtual path to place content under (e.g. "/photos/vacation", or "/" for root)
 ///
 /// Emits `scan-progress` events via the app handle for real-time UI updates.
@@ -131,33 +158,20 @@ pub async fn scan_directory(
     app: AppHandle,
     state: State<'_, AppState>,
     source: String,
-    store_path: String,
     target_path: String,
 ) -> Result<ScanStats, String> {
-    let store_path_buf = PathBuf::from(&store_path);
+    let store_path_buf = state.store_path.lock().map_err(|e| e.to_string())?.clone();
     let source_path = PathBuf::from(&source);
 
     // Take the store out of state (or open a fresh one).
     // redb locks the DB file, so we can't have two Store handles simultaneously.
     let store = {
-        let current_store_path = state.store_path.lock().map_err(|e| e.to_string())?;
         let mut store_guard = state.store.lock().map_err(|e| e.to_string())?;
-
-        if store_guard.is_some() && *current_store_path == store_path_buf {
-            // Take ownership — state becomes None temporarily
-            store_guard.take().unwrap()
-        } else {
-            // Drop existing store (if any) before opening new path
-            store_guard.take();
-            Store::open(&store_path_buf).map_err(|e| e.to_string())?
+        match store_guard.take() {
+            Some(s) => s,
+            None => Store::open(&store_path_buf).map_err(|e| e.to_string())?,
         }
     };
-
-    // Update the stored path
-    {
-        let mut sp = state.store_path.lock().map_err(|e| e.to_string())?;
-        *sp = store_path_buf.clone();
-    }
 
     // Spawn the heavy scanning work on a blocking thread
     let result = tokio::task::spawn_blocking(move || {
@@ -176,6 +190,7 @@ pub async fn scan_directory(
     .map_err(|e| format!("Scan task failed: {e}"))?;
 
     let (store, stats) = result;
+    let stats = stats?;
 
     // Put the store back into state so subsequent queries work
     {
@@ -183,5 +198,137 @@ pub async fn scan_directory(
         *store_guard = Some(store);
     }
 
-    stats
+    // Accumulate stats on the active workspace
+    {
+        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+        if let Some(active_id) = config.active_workspace_id.clone() {
+            if let Some(ws) = config.find_mut(&active_id) {
+                ws.stats.total_files += stats.total_files;
+                ws.stats.total_dirs += stats.total_dirs;
+                ws.stats.unique_blobs += stats.unique_blobs;
+                ws.stats.duplicate_files += stats.duplicate_files;
+                ws.stats.total_original_bytes += stats.total_original_bytes;
+                ws.stats.total_stored_bytes += stats.total_stored_bytes;
+                ws.stats.scans_count += 1;
+                ws.stats.last_scan_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+            }
+        }
+    }
+    state.save_config()?;
+
+    Ok(stats)
+}
+
+// ── Workspace commands ──────────────────────────────────────────────
+
+#[tauri::command]
+pub fn list_workspaces(state: State<'_, AppState>) -> Result<WorkspacesConfig, String> {
+    let config = state.workspaces.lock().map_err(|e| e.to_string())?;
+    Ok(config.clone())
+}
+
+#[tauri::command]
+pub fn create_workspace(
+    state: State<'_, AppState>,
+    label: String,
+    tags: Vec<String>,
+    store_path: String,
+) -> Result<Workspace, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let ws = Workspace {
+        id: workspace::generate_id(),
+        label,
+        tags,
+        store_path,
+        created_at: now,
+        stats: Default::default(),
+    };
+
+    {
+        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+        config.workspaces.push(ws.clone());
+        // Auto-activate if it's the only workspace
+        if config.workspaces.len() == 1 {
+            config.active_workspace_id = Some(ws.id.clone());
+        }
+    }
+
+    state.save_config()?;
+    Ok(ws)
+}
+
+#[tauri::command]
+pub fn switch_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<Workspace, String> {
+    let ws = {
+        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+        let ws = config
+            .find(&workspace_id)
+            .cloned()
+            .ok_or_else(|| format!("Workspace not found: {workspace_id}"))?;
+        config.active_workspace_id = Some(workspace_id);
+        ws
+    };
+
+    state.save_config()?;
+
+    // Close current store and switch to the new workspace's store path
+    {
+        let mut store_guard = state.store.lock().map_err(|e| e.to_string())?;
+        *store_guard = None;
+    }
+    {
+        let mut sp = state.store_path.lock().map_err(|e| e.to_string())?;
+        *sp = PathBuf::from(&ws.store_path);
+    }
+
+    // Try to open the store (it may not exist yet if nothing has been scanned)
+    state.ensure_store().ok();
+
+    Ok(ws)
+}
+
+#[tauri::command]
+pub fn delete_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<(), String> {
+    {
+        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+        config.workspaces.retain(|w| w.id != workspace_id);
+        if config.active_workspace_id.as_deref() == Some(&workspace_id) {
+            config.active_workspace_id = config.workspaces.first().map(|w| w.id.clone());
+        }
+    }
+
+    state.save_config()?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn export_workspaces(state: State<'_, AppState>) -> Result<String, String> {
+    let config = state.workspaces.lock().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&*config).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn import_workspaces(state: State<'_, AppState>, json: String) -> Result<WorkspacesConfig, String> {
+    let imported: WorkspacesConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+
+    {
+        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+        // Merge: add workspaces that don't already exist (by ID)
+        for ws in imported.workspaces {
+            if !config.workspaces.iter().any(|existing| existing.id == ws.id) {
+                config.workspaces.push(ws);
+            }
+        }
+    }
+
+    state.save_config()?;
+    let config = state.workspaces.lock().map_err(|e| e.to_string())?;
+    Ok(config.clone())
 }
