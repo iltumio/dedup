@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri-2/refs/heads/main/core/tauri-config-schema/schema.json",
   "productName": "dedup",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "com.dedup.app",
   "build": {
     "frontendDist": "../build",
