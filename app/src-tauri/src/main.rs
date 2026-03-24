@@ -25,7 +25,8 @@ fn main() {
             commands::delete_workspace,
             commands::export_workspaces,
             commands::import_workspaces,
-            commands::get_extension_stats,
+ commands::get_extension_stats,
+ commands::import_workspace,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dedup app");

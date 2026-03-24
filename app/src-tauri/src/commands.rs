@@ -332,3 +332,88 @@ pub fn import_workspaces(state: State<'_, AppState>, json: String) -> Result<Wor
     let config = state.workspaces.lock().map_err(|e| e.to_string())?;
     Ok(config.clone())
 }
+
+#[tauri::command]
+pub fn import_workspace(
+ state: State<'_, AppState>,
+ store_path: String,
+ label: String,
+) -> Result<Workspace, String> {
+ let path = PathBuf::from(&store_path);
+
+ // If the user selected a metadata.redb file, use its parent directory
+ let store_dir = if path.is_file()
+ && path
+ .file_name()
+ .map(|n| n == "metadata.redb")
+ .unwrap_or(false)
+ {
+ path.parent()
+ .ok_or_else(|| "Cannot determine store directory from file path".to_string())?
+ .to_path_buf()
+ } else {
+ path
+ };
+
+ // Validate the store directory exists and has the expected structure
+ let metadata_path = store_dir.join("metadata.redb");
+ if !metadata_path.exists() {
+ return Err(format!(
+ "Invalid store directory: metadata.redb not found in {}",
+ store_dir.display()
+ ));
+ }
+
+ // Check that a workspace with this store path doesn't already exist
+ let store_dir_str = store_dir.to_string_lossy().to_string();
+ {
+ let config = state.workspaces.lock().map_err(|e| e.to_string())?;
+ if config
+ .workspaces
+ .iter()
+ .any(|w| w.store_path == store_dir_str)
+ {
+ return Err("A workspace with this store path already exists.".to_string());
+ }
+ }
+
+ // Open the store to compute stats
+ let store = Store::open(&store_dir).map_err(|e| e.to_string())?;
+ let (total_files, total_dirs, unique_blobs, duplicate_files, total_original_bytes, total_stored_bytes) =
+ store.compute_stats().map_err(|e| e.to_string())?;
+
+ let now = std::time::SystemTime::now()
+ .duration_since(std::time::UNIX_EPOCH)
+ .unwrap_or_default()
+ .as_secs();
+
+ let ws = Workspace {
+ id: workspace::generate_id(),
+ label,
+ tags: vec!["imported".to_string()],
+ store_path: store_dir_str,
+ created_at: now,
+ stats: workspace::WorkspaceStats {
+ total_files,
+ total_dirs,
+ unique_blobs,
+ duplicate_files,
+ total_original_bytes,
+ total_stored_bytes,
+ scans_count: 0,
+ last_scan_at: 0,
+ },
+ };
+
+ {
+ let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+ config.workspaces.push(ws.clone());
+ // Auto-activate if it's the only workspace
+ if config.workspaces.len() == 1 {
+ config.active_workspace_id = Some(ws.id.clone());
+ }
+ }
+
+ state.save_config()?;
+ Ok(ws)
+}

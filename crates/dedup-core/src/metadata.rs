@@ -319,6 +319,64 @@ impl MetadataDb {
 
         Ok(result)
     }
+
+ /// Compute aggregate statistics for the entire store.
+ ///
+ /// Returns (total_files, total_dirs, unique_blobs, duplicate_files,
+ /// total_original_bytes, total_stored_bytes).
+ pub fn compute_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64)> {
+ let read_txn = self.db.begin_read()?;
+ let paths_table = read_txn.open_table(PATHS_TABLE)?;
+ let dirs_table = read_txn.open_table(DIRS_TABLE)?;
+ let cid_paths = read_txn.open_multimap_table(CID_PATHS_TABLE)?;
+
+ // Count files and accumulate byte totals
+ let mut total_files: u64 = 0;
+ let mut total_original_bytes: u64 = 0;
+ let mut total_stored_bytes: u64 = 0;
+ {
+ let iter = paths_table.iter()?;
+ for item in iter {
+ let item = item?;
+ let meta: FileMetadata = bincode::deserialize(item.1.value())
+ .context("failed to deserialize FileMetadata")?;
+ total_files += 1;
+ total_original_bytes += meta.original_size;
+ total_stored_bytes += meta.compressed_size;
+ }
+ }
+
+ // Count directories
+ let mut total_dirs: u64 = 0;
+ {
+ let iter = dirs_table.iter()?;
+ for item in iter {
+ item?;
+ total_dirs += 1;
+ }
+ }
+
+ // Count unique blobs and duplicate files
+ let mut unique_blobs: u64 = 0;
+ let mut duplicate_files: u64 = 0;
+ {
+ let iter = cid_paths.iter()?;
+ for item in iter {
+ let (_key, values) = item?;
+ let mut count: u64 = 0;
+ for v in values {
+ v?;
+ count += 1;
+ }
+ unique_blobs += 1;
+ if count > 1 {
+ duplicate_files += count;
+ }
+ }
+ }
+
+ Ok((total_files, total_dirs, unique_blobs, duplicate_files, total_original_bytes, total_stored_bytes))
+ }
 }
 
 #[cfg(test)]

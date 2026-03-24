@@ -12,6 +12,7 @@
 		deleteWorkspace,
 		exportWorkspaces,
 		importWorkspaces,
+		importWorkspace,
 		type DirEntry,
 		type ScanStats,
 		type ScanProgress,
@@ -41,6 +42,10 @@
 	let newWsTags = $state('');
 	let newWsStorePath = $state('');
 	let wsError = $state<string | null>(null);
+	let showImportWorkspace = $state(false);
+	let importWsStorePath = $state('');
+	let importWsLabel = $state('');
+	let importingWs = $state(false);
 
 	let activeWorkspace = $derived(
 		workspacesConfig.workspaces.find((w) => w.id === workspacesConfig.active_workspace_id) ?? null
@@ -73,6 +78,7 @@
 	function openWorkspaceManager() {
 		wsError = null;
 		showCreateWorkspace = false;
+		showImportWorkspace = false;
 		showWorkspaceDialog = true;
 	}
 
@@ -158,6 +164,29 @@
 			input.click();
 		} catch (e) {
 			wsError = String(e);
+		}
+	}
+
+	function openImportWorkspace() {
+		importWsStorePath = '';
+		importWsLabel = '';
+		wsError = null;
+		showImportWorkspace = true;
+	}
+
+	async function handleImportWorkspace() {
+		if (!importWsStorePath.trim() || !importWsLabel.trim()) return;
+		wsError = null;
+		importingWs = true;
+		try {
+			await importWorkspace(importWsStorePath, importWsLabel);
+			workspacesConfig = await listWorkspaces();
+			showImportWorkspace = false;
+			treeRefreshKey++;
+		} catch (e) {
+			wsError = String(e);
+		} finally {
+			importingWs = false;
 		}
 	}
 
@@ -369,6 +398,35 @@
 							Create
 						</button>
 					</div>
+				{:else if showImportWorkspace}
+					<h2>Import Existing Store</h2>
+					<label>
+						<span>Label</span>
+						<input type="text" bind:value={importWsLabel} placeholder="My Imported Store" disabled={importingWs} />
+					</label>
+					<label>
+						<span>Store path</span>
+						<input
+							type="text"
+							bind:value={importWsStorePath}
+							placeholder="/path/to/.store or /path/to/.store/metadata.redb"
+							disabled={importingWs}
+						/>
+						<span class="hint">Path to an existing .store directory or its metadata.redb file</span>
+					</label>
+
+					{#if wsError}
+						<div class="error">{wsError}</div>
+					{/if}
+
+					<div class="dialog-actions">
+						<button class="cancel" onclick={() => (showImportWorkspace = false)} disabled={importingWs}>
+							Back
+						</button>
+						<button class="primary" onclick={handleImportWorkspace} disabled={importingWs}>
+							{importingWs ? 'Importing...' : 'Import'}
+						</button>
+					</div>
 				{:else}
 					<h2>Workspaces</h2>
 
@@ -426,10 +484,13 @@
 
 					<div class="dialog-actions">
 						<button class="secondary" onclick={handleExportWorkspaces}>Export</button>
-						<button class="secondary" onclick={handleImportWorkspaces}>Import</button>
+						<button class="secondary" onclick={handleImportWorkspaces}>Import Config</button>
 						<div class="spacer"></div>
 						<button class="cancel" onclick={() => (showWorkspaceDialog = false)}>
 							Close
+						</button>
+						<button class="primary" onclick={openImportWorkspace}>
+							Import Existing
 						</button>
 						<button class="primary" onclick={openCreateWorkspace}>
 							New Workspace

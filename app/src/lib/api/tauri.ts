@@ -152,3 +152,7 @@ export async function exportWorkspaces(): Promise<string> {
 export async function importWorkspaces(json: string): Promise<WorkspacesConfig> {
 	return invoke('import_workspaces', { json });
 }
+
+export async function importWorkspace(storePath: string, label: string): Promise<Workspace> {
+	return invoke('import_workspace', { storePath, label });
+}
