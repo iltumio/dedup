@@ -138,6 +138,13 @@ fn cmd_scan(source: &PathBuf, store_path: &PathBuf, target: &str) -> Result<()> 
         println!("  Space saved:     {} ({:.1}%)", format_size(saved_bytes), saved_pct);
     }
 
+    if stats.skipped_files > 0 {
+        println!("  Skipped files:   {} (errors)", stats.skipped_files);
+        if let Some(ref log_path) = stats.errors_log_path {
+            println!("  Error log:       {log_path}");
+        }
+    }
+
     Ok(())
 }
 

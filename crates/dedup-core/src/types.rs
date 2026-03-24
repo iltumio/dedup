@@ -54,6 +54,10 @@ pub struct ScanStats {
     pub total_original_bytes: u64,
     /// Total bytes after deduplication + compression.
     pub total_stored_bytes: u64,
+    /// Number of files skipped due to read errors.
+    pub skipped_files: u64,
+    /// Path to the error log file (if any errors occurred).
+    pub errors_log_path: Option<String>,
 }
 
 impl ScanStats {
@@ -65,6 +69,8 @@ impl ScanStats {
             duplicate_files: 0,
             total_original_bytes: 0,
             total_stored_bytes: 0,
+            skipped_files: 0,
+            errors_log_path: None,
         }
     }
 }
@@ -88,6 +94,8 @@ pub struct ScanProgress {
     pub bytes_stored: u64,
     /// Number of duplicate files found so far.
     pub duplicates_found: u64,
+    /// Number of files skipped due to errors so far.
+    pub skipped_files: u64,
     /// Name of the file currently being processed.
     pub current_file: String,
 }

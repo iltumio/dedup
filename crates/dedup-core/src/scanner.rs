@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -16,10 +17,11 @@ use crate::types::{DirMetadata, FileMetadata, ScanProgress, ScanStats};
 /// This is a convenience wrapper around [`scan_directory_into`].
 pub fn scan_directory(
     source: &Path,
+    store_root: &Path,
     content_store: &ContentStore,
     metadata_db: &MetadataDb,
 ) -> Result<ScanStats> {
-    scan_directory_into(source, "/", content_store, metadata_db, |_| {})
+    scan_directory_into(source, "/", store_root, content_store, metadata_db, |_| {})
 }
 
 /// Scan a source directory and place its contents under `target_prefix` in
@@ -31,11 +33,15 @@ pub fn scan_directory(
 /// - Existing entries in the store are preserved (incremental).
 /// - Duplicate content is stored only once (deduplicated).
 ///
+/// Files that fail to read (permission denied, I/O errors, etc.) are skipped
+/// and their errors are logged to `<store_root>/errors_<vdir_name>.log`.
+///
 /// The `on_progress` callback is invoked after each file is processed,
 /// enabling real-time progress reporting.
 pub fn scan_directory_into<F>(
     source: &Path,
     target_prefix: &str,
+    store_root: &Path,
     content_store: &ContentStore,
     metadata_db: &MetadataDb,
     on_progress: F,
@@ -66,14 +72,81 @@ where
 
     let mut stats = ScanStats::new();
 
+    // Build the error log path from the virtual directory name.
+    // e.g. target_prefix="/photos/vacation" → "errors_photos_vacation.log"
+    let error_log_name = {
+        let sanitized = if prefix.is_empty() {
+            "root".to_string()
+        } else {
+            prefix
+                .trim_start_matches('/')
+                .replace('/', "_")
+                .replace(|c: char| !c.is_alphanumeric() && c != '_' && c != '-', "_")
+        };
+        format!("errors_{sanitized}.log")
+    };
+    let error_log_path = store_root.join(&error_log_name);
+
+    // Lazily-opened error log file handle. Only created if errors occur.
+    let mut error_log: Option<fs::File> = None;
+
+    /// Write an error entry to the log file, creating it if needed.
+    macro_rules! log_error {
+        ($log:expr, $path:expr, $err:expr, $entry_path:expr) => {{
+            let file = match $log {
+                Some(ref mut f) => f,
+                None => {
+                    let f = fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&$path)
+                        .ok();
+                    match f {
+                        Some(f) => {
+                            *$log = Some(f);
+                            ($log).as_mut().unwrap()
+                        }
+                        None => {
+                            // Can't even open the error log — just skip silently.
+                            return;
+                        }
+                    }
+                }
+            };
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _ = writeln!(file, "[{timestamp}] {}: {}", $entry_path, $err);
+        }};
+    }
+
     for entry in WalkDir::new(&source).follow_links(false) {
-        let entry = entry.context("failed to read directory entry")?;
+        // Error reading the directory entry itself (e.g. permission denied on dir)
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                let entry_path = err
+                    .path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                (|| log_error!(&mut error_log, error_log_path, err, entry_path))();
+                stats.skipped_files += 1;
+                continue;
+            }
+        };
         let abs_path = entry.path();
 
         // Compute virtual path relative to source root
-        let relative = abs_path
-            .strip_prefix(&source)
-            .context("failed to compute relative path")?;
+        let relative = match abs_path.strip_prefix(&source) {
+            Ok(r) => r,
+            Err(err) => {
+                let display = abs_path.display().to_string();
+                (|| log_error!(&mut error_log, error_log_path, err, display))();
+                stats.skipped_files += 1;
+                continue;
+            }
+        };
 
         let rel_str = relative.to_string_lossy().replace('\\', "/");
 
@@ -88,8 +161,17 @@ where
             format!("{prefix}/{rel_str}")
         };
 
-        let fs_meta = fs::metadata(abs_path)
-            .with_context(|| format!("failed to read metadata: {}", abs_path.display()))?;
+        // Read filesystem metadata — skip on error
+        let fs_meta = match fs::metadata(abs_path) {
+            Ok(m) => m,
+            Err(err) => {
+                let msg = format!("failed to read metadata: {err}");
+                let display = abs_path.display().to_string();
+                (|| log_error!(&mut error_log, error_log_path, msg, display))();
+                stats.skipped_files += 1;
+                continue;
+            }
+        };
 
         if fs_meta.is_dir() {
             let modified = extract_mtime(&fs_meta);
@@ -104,8 +186,26 @@ where
 
             stats.total_dirs += 1;
         } else if fs_meta.is_file() {
-            let data = fs::read(abs_path)
-                .with_context(|| format!("failed to read file: {}", abs_path.display()))?;
+            // Read file content — skip on error
+            let data = match fs::read(abs_path) {
+                Ok(d) => d,
+                Err(err) => {
+                    let msg = format!("failed to read file: {err}");
+                    let display = abs_path.display().to_string();
+                    (|| log_error!(&mut error_log, error_log_path, msg, display))();
+                    stats.skipped_files += 1;
+                    on_progress(&ScanProgress {
+                        files_processed: stats.total_files,
+                        dirs_processed: stats.total_dirs,
+                        bytes_processed: stats.total_original_bytes,
+                        bytes_stored: stats.total_stored_bytes,
+                        duplicates_found: stats.duplicate_files,
+                        skipped_files: stats.skipped_files,
+                        current_file: virtual_path,
+                    });
+                    continue;
+                }
+            };
 
             let cid = cid_util::compute_cid(&data);
             let cid_str = cid_util::cid_to_string(&cid);
@@ -161,10 +261,16 @@ where
                 bytes_processed: stats.total_original_bytes,
                 bytes_stored: stats.total_stored_bytes,
                 duplicates_found: stats.duplicate_files,
+                skipped_files: stats.skipped_files,
                 current_file: virtual_path,
             });
         }
         // Skip symlinks, special files, etc.
+    }
+
+    // Set the error log path in stats if any errors were logged
+    if error_log.is_some() {
+        stats.errors_log_path = Some(error_log_path.to_string_lossy().to_string());
     }
 
     Ok(stats)
@@ -218,7 +324,7 @@ mod tests {
 
     #[test]
     fn scan_simple_directory() {
-        let (source_dir, _store_dir, content_store, metadata_db) = setup_test_store();
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
 
         fs::write(source_dir.path().join("hello.txt"), b"hello world").unwrap();
         fs::write(source_dir.path().join("bye.txt"), b"goodbye world").unwrap();
@@ -229,23 +335,36 @@ mod tests {
         )
         .unwrap();
 
-        let stats = scan_directory(source_dir.path(), &content_store, &metadata_db).unwrap();
+        let stats = scan_directory(
+            source_dir.path(),
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+        )
+        .unwrap();
 
         assert_eq!(stats.total_files, 3);
         assert_eq!(stats.total_dirs, 1);
         assert_eq!(stats.unique_blobs, 3);
         assert_eq!(stats.duplicate_files, 0);
+        assert_eq!(stats.skipped_files, 0);
     }
 
     #[test]
     fn scan_detects_duplicates() {
-        let (source_dir, _store_dir, content_store, metadata_db) = setup_test_store();
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
 
         fs::write(source_dir.path().join("file1.txt"), b"identical").unwrap();
         fs::write(source_dir.path().join("file2.txt"), b"identical").unwrap();
         fs::write(source_dir.path().join("unique.txt"), b"different").unwrap();
 
-        let stats = scan_directory(source_dir.path(), &content_store, &metadata_db).unwrap();
+        let stats = scan_directory(
+            source_dir.path(),
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+        )
+        .unwrap();
 
         assert_eq!(stats.total_files, 3);
         assert_eq!(stats.unique_blobs, 2);
@@ -254,11 +373,17 @@ mod tests {
 
     #[test]
     fn scan_metadata_queryable() {
-        let (source_dir, _store_dir, content_store, metadata_db) = setup_test_store();
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
 
         fs::write(source_dir.path().join("test.txt"), b"test content").unwrap();
 
-        scan_directory(source_dir.path(), &content_store, &metadata_db).unwrap();
+        scan_directory(
+            source_dir.path(),
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+        )
+        .unwrap();
 
         let meta = metadata_db.get_file("/test.txt").unwrap();
         assert!(meta.is_some());
@@ -268,7 +393,7 @@ mod tests {
 
     #[test]
     fn scan_into_subdirectory() {
-        let (source_dir, _store_dir, content_store, metadata_db) = setup_test_store();
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
 
         fs::write(source_dir.path().join("a.txt"), b"aaa").unwrap();
         fs::write(source_dir.path().join("b.txt"), b"bbb").unwrap();
@@ -276,6 +401,7 @@ mod tests {
         let stats = scan_directory_into(
             source_dir.path(),
             "/photos/vacation",
+            store_dir.path(),
             &content_store,
             &metadata_db,
             |_| {},
@@ -304,11 +430,17 @@ mod tests {
 
     #[test]
     fn incremental_scan_preserves_existing() {
-        let (source1, _store_dir, content_store, metadata_db) = setup_test_store();
+        let (source1, store_dir, content_store, metadata_db) = setup_test_store();
 
         // First scan
         fs::write(source1.path().join("original.txt"), b"original").unwrap();
-        scan_directory(source1.path(), &content_store, &metadata_db).unwrap();
+        scan_directory(
+            source1.path(),
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+        )
+        .unwrap();
 
         // Second scan into a subdirectory
         let source2 = TempDir::new().unwrap();
@@ -316,6 +448,7 @@ mod tests {
         scan_directory_into(
             source2.path(),
             "/imported",
+            store_dir.path(),
             &content_store,
             &metadata_db,
             |_| {},
@@ -329,14 +462,20 @@ mod tests {
 
     #[test]
     fn progress_callback_fires() {
-        let (source_dir, _store_dir, content_store, metadata_db) = setup_test_store();
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
 
         fs::write(source_dir.path().join("a.txt"), b"aaa").unwrap();
         fs::write(source_dir.path().join("b.txt"), b"bbb").unwrap();
 
         use std::sync::atomic::{AtomicU64, Ordering};
         let count = AtomicU64::new(0);
-        scan_directory_into(source_dir.path(), "/", &content_store, &metadata_db, |_p| {
+        scan_directory_into(
+            source_dir.path(),
+            "/",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            |_p| {
                 count.fetch_add(1, Ordering::Relaxed);
             },
         )

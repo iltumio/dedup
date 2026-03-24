@@ -16,7 +16,7 @@ pub use content_store::ContentStore;
 pub use metadata::MetadataDb;
 pub use types::{DirEntry, DirMetadata, ExtensionStats, FileMetadata, ScanProgress, ScanStats};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -24,6 +24,7 @@ use anyhow::{Context, Result};
 pub struct Store {
     pub content: ContentStore,
     pub metadata: MetadataDb,
+    root: PathBuf,
 }
 
 impl Store {
@@ -43,12 +44,16 @@ impl Store {
         let db_path = root.join("metadata.redb");
         let metadata = MetadataDb::open(&db_path)?;
 
-        Ok(Self { content, metadata })
+        Ok(Self {
+            content,
+            metadata,
+            root: root.to_path_buf(),
+        })
     }
 
     /// Scan a source directory and replicate it into this store under `/`.
     pub fn scan(&self, source: &Path) -> Result<ScanStats> {
-        scanner::scan_directory(source, &self.content, &self.metadata)
+        scanner::scan_directory(source, &self.root, &self.content, &self.metadata)
     }
 
     /// Scan a source directory into a target virtual path (incremental).
@@ -60,7 +65,7 @@ impl Store {
     where
         F: Fn(&types::ScanProgress),
     {
-        scanner::scan_directory_into(source, target_path, &self.content, &self.metadata, on_progress)
+        scanner::scan_directory_into(source, target_path, &self.root, &self.content, &self.metadata, on_progress)
     }
 
     /// List entries in a virtual directory.
@@ -111,4 +116,12 @@ impl Store {
     pub fn extension_stats(&self) -> Result<Vec<ExtensionStats>> {
         self.metadata.extension_stats()
     }
+
+ /// Compute aggregate statistics for the entire store.
+ ///
+ /// Returns (total_files, total_dirs, unique_blobs, duplicate_files,
+ /// total_original_bytes, total_stored_bytes).
+ pub fn compute_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64)> {
+ self.metadata.compute_stats()
+ }
 }
