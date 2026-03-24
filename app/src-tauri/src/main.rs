@@ -7,6 +7,11 @@ mod workspace;
 use commands::AppState;
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     let config_path = workspace::default_config_path();
 
     tauri::Builder::default()
