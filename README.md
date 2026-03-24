@@ -6,7 +6,9 @@ Content-addressed file deduplication tool with a desktop visualizer.
 
 ## Install
 
-### CLI (one-liner)
+### Quick install (CLI or App)
+
+The install script will ask whether you want the CLI or the desktop app:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/iltumio/dedup/main/install.sh | sh
@@ -17,16 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/iltumio/dedup/main/install.sh | sh
 Requires [Rust](https://rustup.rs/) and [just](https://github.com/casey/just).
 
 ```sh
-just build-cli
-# Binary at target/release/dedup
-```
-
-### Desktop app
-
-Download the latest release for your platform from [Releases](https://github.com/iltumio/dedup/releases), or build from source:
-
-```sh
-just build-app
+just build-cli   # CLI binary → target/release/dedup
+just build-app   # Desktop app (also needs Node.js 22+)
 ```
 
 ## Usage
@@ -104,7 +98,7 @@ dedup/
 ├── app/               # Tauri v2 + Svelte 5 desktop app
 │   ├── src-tauri/
 │   └── src/
-├── install.sh         # One-liner installer
+├── install.sh         # Interactive installer (CLI or App)
 └── justfile           # Development commands
 ```
 
