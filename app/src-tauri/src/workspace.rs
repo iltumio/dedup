@@ -75,24 +75,6 @@ impl WorkspacesConfig {
             .as_deref()
             .and_then(|id| self.find(id))
     }
-
-    /// Aggregate stats across all workspaces.
-    pub fn aggregate_stats(&self) -> WorkspaceStats {
-        let mut agg = WorkspaceStats::default();
-        for ws in &self.workspaces {
-            agg.total_files += ws.stats.total_files;
-            agg.total_dirs += ws.stats.total_dirs;
-            agg.unique_blobs += ws.stats.unique_blobs;
-            agg.duplicate_files += ws.stats.duplicate_files;
-            agg.total_original_bytes += ws.stats.total_original_bytes;
-            agg.total_stored_bytes += ws.stats.total_stored_bytes;
-            agg.scans_count += ws.stats.scans_count;
-            if ws.stats.last_scan_at > agg.last_scan_at {
-                agg.last_scan_at = ws.stats.last_scan_at;
-            }
-        }
-        agg
-    }
 }
 
 /// Default location for the workspaces config file.
