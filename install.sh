@@ -28,7 +28,7 @@ ask_component() {
     printf '  2) App  — desktop application (Tauri)\n'
     printf '\n'
     printf 'Enter choice [1/2]: '
-    read -r answer
+    read -r answer </dev/tty
     case "$answer" in
         1|cli)  echo "cli" ;;
         2|app)  echo "app" ;;
