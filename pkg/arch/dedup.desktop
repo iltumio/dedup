@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=dedup
+Comment=Content-Addressed File Browser
+Exec=dedup-app
+Icon=dedup
+Type=Application
+Categories=Utility;FileTools;

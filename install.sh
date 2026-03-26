@@ -104,6 +104,11 @@ install_app() {
         err "unsupported platform: ${os}/${arch}"
     fi
 
+    if [ "$os" = "linux" ] && is_arch_linux; then
+        install_app_arch "$arch"
+        return
+    fi
+
     url="$(get_latest_app_url "$os" "$arch")"
 
     if [ -z "$url" ]; then
@@ -128,6 +133,46 @@ install_app() {
             install_app_windows "${tmpdir}/${filename}"
             ;;
     esac
+}
+
+is_arch_linux() {
+    [ -f /etc/arch-release ] || grep -qi 'arch' /etc/os-release 2>/dev/null
+}
+
+install_app_arch() {
+    arch="$1"
+    url="$(get_latest_arch_pkg_url "$arch")"
+
+    if [ -z "$url" ]; then
+        warn "No Arch package found in release, falling back to AppImage"
+        url="$(get_latest_app_url "linux" "$arch")"
+        if [ -z "$url" ]; then
+            err "could not find desktop app release for linux/${arch}"
+        fi
+        filename="$(basename "$url")"
+        tmpdir="$(mktemp -d)"
+        trap 'rm -rf "$tmpdir"' EXIT
+        info "Downloading ${filename}..."
+        download "$url" "${tmpdir}/${filename}"
+        install_app_linux "${tmpdir}/${filename}"
+        return
+    fi
+
+    filename="$(basename "$url")"
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+
+    info "Detected Arch Linux — installing native package"
+    info "Downloading ${filename}..."
+    download "$url" "${tmpdir}/${filename}"
+
+    if command -v sudo >/dev/null 2>&1; then
+        sudo pacman -U --noconfirm "${tmpdir}/${filename}"
+    else
+        pacman -U --noconfirm "${tmpdir}/${filename}"
+    fi
+
+    info "Installed dedup-app via pacman"
 }
 
 install_app_linux() {
@@ -222,6 +267,14 @@ get_latest_release_url() {
         | grep -o "\"browser_download_url\":[[:space:]]*\"[^\"]*${asset_name}\"" \
         | grep -o 'https://[^"]*')" || true
     echo "$url"
+}
+
+get_latest_arch_pkg_url() {
+    release_url="https://api.github.com/repos/${REPO}/releases/latest"
+    curl -fsSL "$release_url" \
+        | grep -o '"browser_download_url":[[:space:]]*"[^"]*"' \
+        | grep -o 'https://[^"]*' \
+        | grep -i '\.pkg\.tar\.zst$' | head -1 || true
 }
 
 get_latest_app_url() {

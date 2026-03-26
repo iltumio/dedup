@@ -1,0 +1,44 @@
+# Maintainer: iltumio
+pkgname=dedup-app
+pkgver=0.1.3
+pkgrel=1
+pkgdesc='Content-addressed file deduplication tool with a desktop visualizer'
+arch=('x86_64')
+url='https://github.com/iltumio/dedup'
+license=('MIT')
+depends=(
+  'webkit2gtk-4.1'
+  'gtk3'
+  'librsvg'
+  'libappindicator-gtk3'
+)
+makedepends=(
+  'rust'
+  'cargo'
+  'nodejs'
+  'npm'
+  'patchelf'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "dedup-$pkgver/app"
+  npm ci
+}
+
+build() {
+  cd "dedup-$pkgver/app"
+  npx tauri build --no-bundle
+}
+
+package() {
+  cd "dedup-$pkgver"
+
+  install -Dm755 "target/release/dedup-app" "$pkgdir/usr/bin/dedup-app"
+  install -Dm644 "pkg/arch/dedup.desktop" "$pkgdir/usr/share/applications/dedup.desktop"
+  install -Dm644 app/src-tauri/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/dedup.png"
+  install -Dm644 app/src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/dedup.png"
+  install -Dm644 app/src-tauri/icons/32x32.png "$pkgdir/usr/share/icons/hicolor/32x32/apps/dedup.png"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
