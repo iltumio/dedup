@@ -22,12 +22,12 @@ main() {
 }
 
 ask_component() {
-    printf '\n'
+    printf '\n' >&2
     info "What would you like to install?"
-    printf '  1) CLI  — command-line tool\n'
-    printf '  2) App  — desktop application (Tauri)\n'
-    printf '\n'
-    printf 'Enter choice [1/2]: '
+    printf '  1) CLI  — command-line tool\n' >&2
+    printf '  2) App  — desktop application (Tauri)\n' >&2
+    printf '\n' >&2
+    printf 'Enter choice [1/2]: ' >&2
     read -r answer </dev/tty
     case "$answer" in
         1|cli)  echo "cli" ;;
@@ -260,11 +260,11 @@ need_cmd() {
 }
 
 info() {
-    printf '\033[1;32m=>\033[0m %s\n' "$1"
+    printf '\033[1;32m=>\033[0m %s\n' "$1" >&2
 }
 
 warn() {
-    printf '\033[1;33mwarning:\033[0m %s\n' "$1"
+    printf '\033[1;33mwarning:\033[0m %s\n' "$1" >&2
 }
 
 err() {
