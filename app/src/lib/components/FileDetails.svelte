@@ -201,7 +201,7 @@
 			{#if duplicates.length > 1}
 				<div class="alert alert-error mt-4 block">
 					<div class="text-sm font-semibold">{duplicates.length} copies of this file</div>
-					<ul class="font-path mt-2 space-y-1 text-xs">
+					<ul class="font-path mt-2 min-w-0 space-y-1 break-all text-xs">
 						{#each duplicates as dup}
 							<li class={dup === path ? 'font-semibold text-error-content' : 'opacity-80'}>
 								{dup}
