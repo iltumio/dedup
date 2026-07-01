@@ -64,11 +64,23 @@ impl Store {
     /// Existing entries in the store are preserved. New entries are added
     /// under `target_path`. The `on_progress` callback is invoked after
     /// each file is processed.
-    pub fn scan_into<F>(&self, source: &Path, target_path: &str, on_progress: F) -> Result<ScanStats>
+    pub fn scan_into<F>(
+        &self,
+        source: &Path,
+        target_path: &str,
+        on_progress: F,
+    ) -> Result<ScanStats>
     where
         F: Fn(&types::ScanProgress),
     {
-        scanner::scan_directory_into(source, target_path, &self.root, &self.content, &self.metadata, on_progress)
+        scanner::scan_directory_into(
+            source,
+            target_path,
+            &self.root,
+            &self.content,
+            &self.metadata,
+            on_progress,
+        )
     }
 
     /// Scan a source directory into a target virtual path with explicit options.
@@ -188,11 +200,11 @@ impl Store {
         self.metadata.extension_stats()
     }
 
- /// Compute aggregate statistics for the entire store.
- ///
- /// Returns (total_files, total_dirs, unique_blobs, duplicate_files,
- /// total_original_bytes, total_stored_bytes).
- pub fn compute_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64)> {
- self.metadata.compute_stats()
- }
+    /// Compute aggregate statistics for the entire store.
+    ///
+    /// Returns (total_files, total_dirs, unique_blobs, duplicate_files,
+    /// total_original_bytes, total_stored_bytes).
+    pub fn compute_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64)> {
+        self.metadata.compute_stats()
+    }
 }

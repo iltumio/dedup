@@ -213,13 +213,11 @@ mod tests {
             ScanRuleAction::Archive
         );
         assert_eq!(
-            BuiltinScanPreset::deserialize(StrDeserializer::<DeError>::new("rust_target"))
-                .unwrap(),
+            BuiltinScanPreset::deserialize(StrDeserializer::<DeError>::new("rust_target")).unwrap(),
             BuiltinScanPreset::RustTarget
         );
         assert_eq!(
-            BuiltinScanPreset::deserialize(StrDeserializer::<DeError>::new("python_venv"))
-                .unwrap(),
+            BuiltinScanPreset::deserialize(StrDeserializer::<DeError>::new("python_venv")).unwrap(),
             BuiltinScanPreset::PythonVenv
         );
     }

@@ -122,10 +122,7 @@ pub fn open_file(state: State<'_, AppState>, path: String) -> Result<(), String>
     let data = store.read_file(&path).map_err(|e| e.to_string())?;
 
     // Extract the original filename from the virtual path
-    let filename = path
-        .rsplit('/')
-        .next()
-        .unwrap_or("file");
+    let filename = path.rsplit('/').next().unwrap_or("file");
 
     // Write to a temp file preserving the original name so the OS picks the right app
     let tmp_dir = std::env::temp_dir().join("dedup-preview");
@@ -364,7 +361,10 @@ pub fn create_workspace(
 }
 
 #[tauri::command]
-pub fn switch_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<Workspace, String> {
+pub fn switch_workspace(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<Workspace, String> {
     let ws = {
         let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
         let ws = config
@@ -414,7 +414,10 @@ pub fn export_workspaces(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn import_workspaces(state: State<'_, AppState>, json: String) -> Result<WorkspacesConfig, String> {
+pub fn import_workspaces(
+    state: State<'_, AppState>,
+    json: String,
+) -> Result<WorkspacesConfig, String> {
     let imported: WorkspacesConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
     for rule in &imported.custom_scan_rules {
         validate_custom_scan_rule(rule)?;
@@ -423,7 +426,11 @@ pub fn import_workspaces(state: State<'_, AppState>, json: String) -> Result<Wor
     state.update_config_transactionally(|config| {
         // Merge: add workspaces that don't already exist (by ID)
         for ws in imported.workspaces {
-            if !config.workspaces.iter().any(|existing| existing.id == ws.id) {
+            if !config
+                .workspaces
+                .iter()
+                .any(|existing| existing.id == ws.id)
+            {
                 config.workspaces.push(ws);
             }
         }
@@ -435,87 +442,93 @@ pub fn import_workspaces(state: State<'_, AppState>, json: String) -> Result<Wor
 
 #[tauri::command]
 pub fn import_workspace(
- state: State<'_, AppState>,
- store_path: String,
- label: String,
+    state: State<'_, AppState>,
+    store_path: String,
+    label: String,
 ) -> Result<Workspace, String> {
- let path = PathBuf::from(&store_path);
+    let path = PathBuf::from(&store_path);
 
- // If the user selected a metadata.redb file, use its parent directory
- let store_dir = if path.is_file()
- && path
- .file_name()
- .map(|n| n == "metadata.redb")
- .unwrap_or(false)
- {
- path.parent()
- .ok_or_else(|| "Cannot determine store directory from file path".to_string())?
- .to_path_buf()
- } else {
- path
- };
+    // If the user selected a metadata.redb file, use its parent directory
+    let store_dir = if path.is_file()
+        && path
+            .file_name()
+            .map(|n| n == "metadata.redb")
+            .unwrap_or(false)
+    {
+        path.parent()
+            .ok_or_else(|| "Cannot determine store directory from file path".to_string())?
+            .to_path_buf()
+    } else {
+        path
+    };
 
- // Validate the store directory exists and has the expected structure
- let metadata_path = store_dir.join("metadata.redb");
- if !metadata_path.exists() {
- return Err(format!(
- "Invalid store directory: metadata.redb not found in {}",
- store_dir.display()
- ));
- }
+    // Validate the store directory exists and has the expected structure
+    let metadata_path = store_dir.join("metadata.redb");
+    if !metadata_path.exists() {
+        return Err(format!(
+            "Invalid store directory: metadata.redb not found in {}",
+            store_dir.display()
+        ));
+    }
 
- // Check that a workspace with this store path doesn't already exist
- let store_dir_str = store_dir.to_string_lossy().to_string();
- {
- let config = state.workspaces.lock().map_err(|e| e.to_string())?;
- if config
- .workspaces
- .iter()
- .any(|w| w.store_path == store_dir_str)
- {
- return Err("A workspace with this store path already exists.".to_string());
- }
- }
+    // Check that a workspace with this store path doesn't already exist
+    let store_dir_str = store_dir.to_string_lossy().to_string();
+    {
+        let config = state.workspaces.lock().map_err(|e| e.to_string())?;
+        if config
+            .workspaces
+            .iter()
+            .any(|w| w.store_path == store_dir_str)
+        {
+            return Err("A workspace with this store path already exists.".to_string());
+        }
+    }
 
- // Open the store to compute stats
- let store = Store::open(&store_dir).map_err(|e| e.to_string())?;
- let (total_files, total_dirs, unique_blobs, duplicate_files, total_original_bytes, total_stored_bytes) =
- store.compute_stats().map_err(|e| e.to_string())?;
+    // Open the store to compute stats
+    let store = Store::open(&store_dir).map_err(|e| e.to_string())?;
+    let (
+        total_files,
+        total_dirs,
+        unique_blobs,
+        duplicate_files,
+        total_original_bytes,
+        total_stored_bytes,
+    ) = store.compute_stats().map_err(|e| e.to_string())?;
 
- let now = std::time::SystemTime::now()
- .duration_since(std::time::UNIX_EPOCH)
- .unwrap_or_default()
- .as_secs();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
- let ws = Workspace {
- id: workspace::generate_id(),
- label,
- tags: vec!["imported".to_string()],
- store_path: store_dir_str,
- created_at: now,
- stats: workspace::WorkspaceStats {
- total_files,
- total_dirs,
- unique_blobs,
- duplicate_files,
- total_original_bytes,
- total_stored_bytes,
- scans_count: 0,
- last_scan_at: 0,
- },
- };
+    let ws = Workspace {
+        id: workspace::generate_id(),
+        label,
+        tags: vec!["imported".to_string()],
+        store_path: store_dir_str,
+        created_at: now,
+        stats: workspace::WorkspaceStats {
+            total_files,
+            total_dirs,
+            unique_blobs,
+            duplicate_files,
+            total_original_bytes,
+            total_stored_bytes,
+            scans_count: 0,
+            last_scan_at: 0,
+        },
+    };
 
- {
- let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
- config.workspaces.push(ws.clone());
- // Auto-activate if it's the only workspace
- if config.workspaces.len() == 1 {
- config.active_workspace_id = Some(ws.id.clone());
- }
- }
+    {
+        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+        config.workspaces.push(ws.clone());
+        // Auto-activate if it's the only workspace
+        if config.workspaces.len() == 1 {
+            config.active_workspace_id = Some(ws.id.clone());
+        }
+    }
 
- state.save_config()?;
- Ok(ws)
+    state.save_config()?;
+    Ok(ws)
 }
 
 #[cfg(test)]
@@ -561,15 +574,16 @@ mod tests {
 
     #[test]
     fn transactional_config_update_restores_previous_rules_when_save_fails() {
-        let config_dir = std::env::temp_dir().join(format!(
-            "dedup-config-dir-{}",
-            workspace::generate_id()
-        ));
+        let config_dir =
+            std::env::temp_dir().join(format!("dedup-config-dir-{}", workspace::generate_id()));
         std::fs::create_dir_all(&config_dir).expect("test config directory should be created");
 
         let state = AppState::new(config_dir.clone());
         {
-            let mut config = state.workspaces.lock().expect("workspace lock should be available");
+            let mut config = state
+                .workspaces
+                .lock()
+                .expect("workspace lock should be available");
             config.custom_scan_rules = vec![custom_rule("old", "Old", "old")];
         }
 
@@ -579,7 +593,10 @@ mod tests {
         });
 
         assert!(result.is_err());
-        let config = state.workspaces.lock().expect("workspace lock should be available");
+        let config = state
+            .workspaces
+            .lock()
+            .expect("workspace lock should be available");
         assert_eq!(config.custom_scan_rules.len(), 1);
         assert_eq!(config.custom_scan_rules[0].id, "old");
 

@@ -258,10 +258,16 @@ fn cmd_scan(
     );
 
     if stats.total_original_bytes > 0 {
-        let saved_bytes = stats.total_original_bytes.saturating_sub(stats.total_stored_bytes);
+        let saved_bytes = stats
+            .total_original_bytes
+            .saturating_sub(stats.total_stored_bytes);
         let ratio = stats.total_stored_bytes as f64 / stats.total_original_bytes as f64;
         let saved_pct = (1.0 - ratio) * 100.0;
-        println!("  Space saved:     {} ({:.1}%)", format_size(saved_bytes), saved_pct);
+        println!(
+            "  Space saved:     {} ({:.1}%)",
+            format_size(saved_bytes),
+            saved_pct
+        );
     }
 
     if stats.skipped_files > 0 {

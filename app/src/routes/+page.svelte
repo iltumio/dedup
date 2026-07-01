@@ -206,10 +206,15 @@
 			input.onchange = async () => {
 				const file = input.files?.[0];
 				if (!file) return;
-				const json = await file.text();
-				workspacesConfig = await importWorkspaces(json);
-				syncCustomScanRulesFromConfig(workspacesConfig.custom_scan_rules);
-				treeRefreshKey++;
+				wsError = null;
+				try {
+					const json = await file.text();
+					workspacesConfig = await importWorkspaces(json);
+					syncCustomScanRulesFromConfig(workspacesConfig.custom_scan_rules);
+					treeRefreshKey++;
+				} catch (e) {
+					wsError = String(e);
+				}
 			};
 			input.click();
 		} catch (e) {
