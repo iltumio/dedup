@@ -58,7 +58,7 @@
 	onclose={restoreFocus}
 >
 	<div
-		class={`modal-box max-h-[calc(100vh-1.5rem)] w-[calc(100vw-1.5rem)] overflow-hidden border border-base-300 bg-base-200 p-0 shadow-xl ${wide ? 'max-w-4xl' : 'max-w-2xl'}`}
+		class={`modal-box flex max-h-[calc(100vh-1.5rem)] w-[calc(100vw-1.5rem)] flex-col overflow-hidden border border-base-300 bg-base-200 p-0 shadow-xl ${wide ? 'max-w-4xl' : 'max-w-2xl'}`}
 	>
 		<header class="flex items-start justify-between gap-4 border-b border-base-300 px-4 py-3">
 			<div class="min-w-0">
@@ -77,7 +77,7 @@
 			</button>
 		</header>
 
-		<div class="min-h-0 overflow-y-auto px-4 py-4">
+		<div class="min-h-0 flex-1 overflow-y-auto px-4 py-4">
 			{@render children?.()}
 		</div>
 
