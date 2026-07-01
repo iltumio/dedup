@@ -16,7 +16,7 @@
 	};
 </script>
 
-<div class="rounded-box border border-base-300 bg-base-200 px-3 py-2">
+<div class="min-w-0 rounded-box border border-base-300 bg-base-200 px-3 py-2">
 	<div class="text-[11px] uppercase text-base-content/50">{label}</div>
-	<div class={`font-path mt-1 text-sm font-semibold ${toneClass[tone]}`}>{value}</div>
+	<div class={`font-path mt-1 truncate text-sm font-semibold ${toneClass[tone]}`}>{value}</div>
 </div>

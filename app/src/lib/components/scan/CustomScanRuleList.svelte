@@ -24,10 +24,10 @@
 		<UiEmptyState title="No saved custom rules" message="Add a rule below to reuse it in future scans." />
 	</div>
 {:else}
-	<ul class="flex list-none flex-col gap-2 p-0">
+	<ul class="flex min-w-0 list-none flex-col gap-2 p-0">
 		{#each rules as rule (rule.id)}
-			<li class="rounded-box border border-base-300 bg-base-100 p-3">
-				<div class="flex items-start gap-3">
+			<li class="min-w-0 rounded-box border border-base-300 bg-base-100 p-3">
+				<div class="flex min-w-0 items-start gap-3">
 					<input
 						id={`${componentId}-${rule.id}`}
 						class="checkbox checkbox-primary checkbox-sm mt-0.5 shrink-0"
@@ -36,9 +36,9 @@
 						{disabled}
 						onchange={(event) => onToggle(rule.id, checkedValue(event))}
 					/>
-					<label class="min-w-0 flex-1" for={`${componentId}-${rule.id}`}>
+					<label class="min-w-0 flex-1 overflow-hidden" for={`${componentId}-${rule.id}`}>
 						<span class="flex min-w-0 flex-wrap items-center gap-2">
-							<span class="truncate text-sm font-medium">{rule.label}</span>
+							<span class="min-w-0 max-w-full truncate text-sm font-medium">{rule.label}</span>
 							{#if rule.action === 'ignore'}
 								<UiBadge tone="warning" text="ignore" />
 							{:else}
@@ -52,6 +52,7 @@
 					<UiButton
 						variant="ghost"
 						size="xs"
+						class="shrink-0"
 						title={`Remove ${rule.label}`}
 						ariaLabel={`Remove ${rule.label}`}
 						disabled={disabled}

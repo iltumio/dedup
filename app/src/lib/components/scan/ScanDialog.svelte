@@ -112,8 +112,8 @@
 	wide
 	onClose={onCloseOrCancel}
 >
-	<div class="flex flex-col gap-5">
-		<section class="grid gap-3">
+	<div class="flex min-w-0 flex-col gap-5">
+		<section class="grid min-w-0 gap-3">
 			<h3 class="text-xs font-semibold uppercase text-base-content/50">Location</h3>
 			<div class="grid gap-3 md:grid-cols-2">
 				<UiField label="Source directory">
@@ -139,12 +139,12 @@
 			</div>
 		</section>
 
-		<section class="grid gap-3">
+		<section class="grid min-w-0 gap-3">
 			<h3 class="text-xs font-semibold uppercase text-base-content/50">Presets</h3>
 			<ScanPresetList {presets} disabled={scanning} onToggle={onPresetChange} />
 		</section>
 
-		<section class="grid gap-3">
+		<section class="grid min-w-0 gap-3">
 			<h3 class="text-xs font-semibold uppercase text-base-content/50">Saved custom rules</h3>
 			<CustomScanRuleList
 				rules={customRules}
@@ -155,7 +155,7 @@
 			/>
 		</section>
 
-		<section class="grid gap-3">
+		<section class="grid min-w-0 gap-3">
 			<h3 class="text-xs font-semibold uppercase text-base-content/50">Add custom rule</h3>
 			<CustomScanRuleEditor
 				label={newRuleLabel}
@@ -171,7 +171,7 @@
 		</section>
 
 		{#if scanning}
-			<section class="grid gap-3">
+			<section class="grid min-w-0 gap-3">
 				<h3 class="text-xs font-semibold uppercase text-base-content/50">Progress</h3>
 				<ScanProgressPanel {progress} starting={scanning && !progress} />
 			</section>
