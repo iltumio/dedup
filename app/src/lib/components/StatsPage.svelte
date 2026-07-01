@@ -98,278 +98,136 @@
 	}
 </script>
 
-<div class="stats-page">
-	<div class="stats-header">
-		<h2>Extension Analytics</h2>
-		<button class="refresh-btn" onclick={loadStats} disabled={loading}>
-			{loading ? 'Loading...' : 'Refresh'}
+<div class="flex h-full min-h-0 flex-col">
+	<header class="flex h-10 shrink-0 items-center justify-between border-b border-base-300 px-4">
+		<h2 class="text-sm font-semibold">Extension Analytics</h2>
+		<button class="btn btn-ghost btn-xs" type="button" onclick={loadStats} disabled={loading}>
+			{#if loading}
+				<span class="loading loading-spinner loading-xs"></span>
+				Loading...
+			{:else}
+				Refresh
+			{/if}
 		</button>
-	</div>
+	</header>
 
-	{#if error}
-		<div class="error">{error}</div>
-	{:else if loading}
-		<div class="loading">Loading stats...</div>
-	{:else if stats.length === 0}
-		<div class="empty">No files in store yet. Scan a directory first.</div>
-	{:else}
-		<!-- Summary cards -->
-		<div class="summary-cards">
-			<div class="card">
-				<span class="card-value">{totalFiles}</span>
-				<span class="card-label">Total Files</span>
+	<div class="min-h-0 flex-1 overflow-y-auto p-4">
+		{#if error}
+			<div class="alert alert-error">
+				<span class="break-all text-sm">{error}</span>
 			</div>
-			<div class="card">
-				<span class="card-value highlight">{totalDups}</span>
-				<span class="card-label">Duplicate Files</span>
+		{:else if loading}
+			<div
+				class="rounded-box flex items-center justify-center gap-2 border border-base-300 bg-base-200 p-10 text-sm text-base-content/60"
+			>
+				<span class="loading loading-spinner loading-sm"></span>
+				Loading stats...
 			</div>
-			<div class="card">
-				<span class="card-value saved">{formatSize(totalSaved)}</span>
-				<span class="card-label">Space Saved</span>
+		{:else if stats.length === 0}
+			<div
+				class="rounded-box border border-base-300 bg-base-200 p-4 text-sm text-base-content/60"
+			>
+				No files in store yet. Scan a directory first.
 			</div>
-			<div class="card">
-				<span class="card-value">{stats.length}</span>
-				<span class="card-label">Extensions</span>
-			</div>
-		</div>
-
-		<!-- Sort tabs -->
-		<div class="sort-tabs">
-			<button class:active={sortBy === 'saved'} onclick={() => (sortBy = 'saved')}>
-				Most Space Saved
-			</button>
-			<button class:active={sortBy === 'dup_pct'} onclick={() => (sortBy = 'dup_pct')}>
-				Highest Dup %
-			</button>
-			<button class:active={sortBy === 'dup_count'} onclick={() => (sortBy = 'dup_count')}>
-				Most Duplicates
-			</button>
-			<button class:active={sortBy === 'files'} onclick={() => (sortBy = 'files')}>
-				Most Files
-			</button>
-		</div>
-
-		<!-- Ranking table -->
-		<div class="ranking">
-			{#each currentList as item, i (item.extension)}
-				<div class="rank-row">
-					<span class="rank-num">#{i + 1}</span>
-					<span class="rank-ext">.{item.extension}</span>
-					<div class="rank-bar-container">
-						<div
-							class="rank-bar"
-							class:bar-saved={sortBy === 'saved'}
-							class:bar-dup={sortBy === 'dup_pct' || sortBy === 'dup_count'}
-							class:bar-files={sortBy === 'files'}
-							style="width: {barWidth(barValue(item), currentMax)}"
-						></div>
-					</div>
-					<span class="rank-value">{formatValue(item)}</span>
-					<div class="rank-detail">
-						<span>{item.total_files} files</span>
-						<span class="sep">·</span>
-						<span class="highlight">{item.duplicate_files} dups ({item.duplicate_pct}%)</span>
-						<span class="sep">·</span>
-						<span class="saved">{formatSize(item.bytes_saved)} saved</span>
-					</div>
+		{:else}
+			<div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+				<div class="rounded-box border border-base-300 bg-base-200 p-3">
+					<div class="font-path text-lg font-bold">{totalFiles}</div>
+					<div class="mt-1 text-xs text-base-content/50">Total Files</div>
 				</div>
-			{/each}
-		</div>
-	{/if}
+				<div class="rounded-box border border-base-300 bg-base-200 p-3">
+					<div class="font-path text-lg font-bold text-error">{totalDups}</div>
+					<div class="mt-1 text-xs text-base-content/50">Duplicate Files</div>
+				</div>
+				<div class="rounded-box border border-base-300 bg-base-200 p-3">
+					<div class="font-path text-lg font-bold text-success">{formatSize(totalSaved)}</div>
+					<div class="mt-1 text-xs text-base-content/50">Space Saved</div>
+				</div>
+				<div class="rounded-box border border-base-300 bg-base-200 p-3">
+					<div class="font-path text-lg font-bold">{stats.length}</div>
+					<div class="mt-1 text-xs text-base-content/50">Extensions</div>
+				</div>
+			</div>
+
+			<div class="mt-4 flex flex-wrap gap-2 border-b border-base-300 pb-3">
+				<button
+					class={sortBy === 'saved' ? 'btn btn-primary btn-xs' : 'btn btn-ghost btn-xs'}
+					type="button"
+					onclick={() => (sortBy = 'saved')}
+				>
+					Most Space Saved
+				</button>
+				<button
+					class={sortBy === 'dup_pct' ? 'btn btn-primary btn-xs' : 'btn btn-ghost btn-xs'}
+					type="button"
+					onclick={() => (sortBy = 'dup_pct')}
+				>
+					Highest Dup %
+				</button>
+				<button
+					class={sortBy === 'dup_count' ? 'btn btn-primary btn-xs' : 'btn btn-ghost btn-xs'}
+					type="button"
+					onclick={() => (sortBy = 'dup_count')}
+				>
+					Most Duplicates
+				</button>
+				<button
+					class={sortBy === 'files' ? 'btn btn-primary btn-xs' : 'btn btn-ghost btn-xs'}
+					type="button"
+					onclick={() => (sortBy = 'files')}
+				>
+					Most Files
+				</button>
+			</div>
+
+			<div class="mt-4 space-y-2">
+				{#each currentList as item, i (item.extension)}
+					<div class="rounded-box border border-base-300 bg-base-200 p-3">
+						<div
+							class="grid gap-2 md:grid-cols-[3rem_minmax(6rem,12rem)_minmax(10rem,1fr)_auto] md:items-center"
+						>
+							<span class="font-path text-xs font-semibold text-base-content/50">#{i + 1}</span>
+							<span class="font-path min-w-0 break-all text-sm font-semibold">
+								.{item.extension}
+							</span>
+							<div class="h-2 overflow-hidden rounded-full bg-base-300">
+								{#if sortBy === 'saved'}
+									<div
+										class="h-full rounded-full bg-success transition-[width]"
+										style="width: {barWidth(barValue(item), currentMax)}"
+									></div>
+								{:else if sortBy === 'dup_pct' || sortBy === 'dup_count'}
+									<div
+										class="h-full rounded-full bg-error transition-[width]"
+										style="width: {barWidth(barValue(item), currentMax)}"
+									></div>
+								{:else}
+									<div
+										class="h-full rounded-full bg-info transition-[width]"
+										style="width: {barWidth(barValue(item), currentMax)}"
+									></div>
+								{/if}
+							</div>
+							<span class="font-path whitespace-nowrap text-right text-sm font-semibold">
+								{formatValue(item)}
+							</span>
+							<div
+								class="font-path flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-xs text-base-content/60 md:col-start-2 md:col-end-5"
+							>
+								<span>{item.total_files} files</span>
+								<span class="opacity-40">·</span>
+								<span class="font-semibold text-error">
+									{item.duplicate_files} dups ({item.duplicate_pct}%)
+								</span>
+								<span class="opacity-40">·</span>
+								<span class="font-semibold text-success">
+									{formatSize(item.bytes_saved)} saved
+								</span>
+							</div>
+						</div>
+					</div>
+				{/each}
+			</div>
+		{/if}
+	</div>
 </div>
-
-<style>
-	.stats-page {
-		height: 100%;
-		overflow-y: auto;
-		padding: 20px 24px;
-		display: flex;
-		flex-direction: column;
-		gap: 16px;
-	}
-
-	.stats-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-	}
-
-	.stats-header h2 {
-		font-size: 16px;
-		font-weight: 600;
-	}
-
-	.refresh-btn {
-		padding: 5px 12px;
-		font-size: 12px;
-		background: var(--app-bg);
-		border: 1px solid var(--app-border-color);
-		border-radius: 5px;
-		cursor: pointer;
-		color: var(--app-text-muted);
-	}
-
-	.refresh-btn:hover {
-		border-color: var(--app-accent);
-		color: var(--app-text);
-	}
-
-	.error {
-		color: var(--app-duplicate);
-		font-size: 13px;
-	}
-
-	.loading,
-	.empty {
-		color: var(--app-text-muted);
-		font-size: 13px;
-		text-align: center;
-		padding: 40px 0;
-	}
-
-	/* Summary cards */
-	.summary-cards {
-		display: grid;
-		grid-template-columns: repeat(4, 1fr);
-		gap: 10px;
-	}
-
-	.card {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 4px;
-		padding: 14px 8px;
-		background: var(--app-bg);
-		border: 1px solid var(--app-border-color);
-		border-radius: 8px;
-	}
-
-	.card-value {
-		font-size: 18px;
-		font-weight: 700;
-		font-family: var(--app-font-mono);
-	}
-
-	.card-label {
-		font-size: 11px;
-		color: var(--app-text-muted);
-	}
-
-	/* Sort tabs */
-	.sort-tabs {
-		display: flex;
-		gap: 4px;
-		border-bottom: 1px solid var(--app-border-color);
-		padding-bottom: 8px;
-	}
-
-	.sort-tabs button {
-		padding: 5px 12px;
-		font-size: 12px;
-		border-radius: 4px;
-		background: none;
-		border: 1px solid transparent;
-		color: var(--app-text-muted);
-		cursor: pointer;
-		transition: all 0.15s;
-	}
-
-	.sort-tabs button:hover {
-		color: var(--app-text);
-	}
-
-	.sort-tabs button.active {
-		background: var(--app-accent);
-		color: var(--app-text);
-		font-weight: 500;
-	}
-
-	/* Ranking */
-	.ranking {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.rank-row {
-		display: grid;
-		grid-template-columns: 32px 64px 1fr auto;
-		grid-template-rows: auto auto;
-		gap: 0 10px;
-		align-items: center;
-		padding: 8px 10px;
-		background: var(--app-bg);
-		border: 1px solid var(--app-border-color);
-		border-radius: 6px;
-	}
-
-	.rank-num {
-		font-size: 12px;
-		font-weight: 600;
-		color: var(--app-text-muted);
-		grid-row: 1 / 3;
-	}
-
-	.rank-ext {
-		font-size: 14px;
-		font-weight: 600;
-		font-family: var(--app-font-mono);
-	}
-
-	.rank-bar-container {
-		height: 6px;
-		background: var(--app-border-color);
-		border-radius: 3px;
-		overflow: hidden;
-	}
-
-	.rank-bar {
-		height: 100%;
-		border-radius: 3px;
-		transition: width 0.3s;
-	}
-
-	.rank-bar.bar-saved {
-		background: var(--app-success);
-	}
-
-	.rank-bar.bar-dup {
-		background: var(--app-duplicate);
-	}
-
-	.rank-bar.bar-files {
-		background: var(--app-accent-light);
-	}
-
-	.rank-value {
-		font-size: 13px;
-		font-weight: 600;
-		font-family: var(--app-font-mono);
-		text-align: right;
-		white-space: nowrap;
-	}
-
-	.rank-detail {
-		grid-column: 2 / -1;
-		font-size: 11px;
-		color: var(--app-text-muted);
-		font-family: var(--app-font-mono);
-		display: flex;
-		gap: 6px;
-	}
-
-	.highlight {
-		color: var(--app-duplicate);
-		font-weight: 600;
-	}
-
-	.saved {
-		color: var(--app-success);
-		font-weight: 600;
-	}
-
-	.sep {
-		opacity: 0.4;
-	}
-</style>

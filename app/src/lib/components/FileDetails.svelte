@@ -117,77 +117,95 @@
 	}
 </script>
 
-<div class="file-details">
-	<div class="header">
-		<span class="title">Details</span>
-	</div>
+<div class="flex h-full min-h-0 flex-col">
+	<header class="flex h-10 shrink-0 items-center border-b border-base-300 px-4">
+		<span class="text-sm font-semibold">Details</span>
+	</header>
 
-	<div class="content">
-		<div class="path-display">
-			<span class="icon">{entry.is_dir ? '📁' : '📄'}</span>
-			<span class="path">{path}</span>
+	<div class="min-h-0 flex-1 overflow-y-auto p-4">
+		<div class="rounded-box border border-base-300 bg-base-200 p-3">
+			<div class="flex min-w-0 items-center gap-2">
+				<span class="text-sm">{entry.is_dir ? 'DIR' : 'FILE'}</span>
+				<span class="font-path min-w-0 flex-1 break-all text-sm">{path}</span>
+			</div>
 		</div>
 
 		{#if !entry.is_dir}
-			<button class="open-btn" onclick={handleOpen} disabled={opening}>
+			<button
+				class="btn btn-primary btn-sm mt-3 w-full"
+				type="button"
+				onclick={handleOpen}
+				disabled={opening}
+			>
 				{opening ? 'Opening...' : 'Open'}
 			</button>
 		{/if}
 
 		{#if isImage && previewUrl}
-			<div class="image-preview">
-				<img src={previewUrl} alt={entry.name} />
+			<div
+				class="rounded-box mt-4 flex min-h-28 items-center justify-center overflow-hidden border border-base-300 bg-base-200"
+			>
+				<img class="max-h-96 max-w-full object-contain" src={previewUrl} alt={entry.name} />
 			</div>
 		{:else if isImage && loading}
-			<div class="image-preview placeholder-img">
-				<span>Loading preview...</span>
+			<div
+				class="rounded-box mt-4 flex h-28 items-center justify-center border border-base-300 bg-base-200 text-sm text-base-content/60"
+			>
+				Loading preview...
 			</div>
 		{/if}
 
 		{#if entry.is_dir}
-			<div class="info-row">
-				<span class="label">Type</span>
-				<span class="value">Directory</span>
+			<div class="mt-4 grid gap-2 sm:grid-cols-2">
+				<div class="rounded-box border border-base-300 bg-base-200 p-3">
+					<div class="text-xs text-base-content/50">Type</div>
+					<div class="mt-1 text-sm font-semibold">Directory</div>
+				</div>
 			</div>
 		{:else if loading}
-			<div class="loading">Loading...</div>
+			<div class="mt-4 text-sm text-base-content/60">Loading...</div>
 		{:else if metadata}
-			<div class="info-grid">
-				<div class="info-row">
-					<span class="label">Size</span>
-					<span class="value">{formatSize(metadata.original_size)}</span>
+			<div class="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+				<div class="rounded-box border border-base-300 bg-base-200 p-3">
+					<div class="text-xs text-base-content/50">Size</div>
+					<div class="font-path mt-1 text-sm font-semibold">
+						{formatSize(metadata.original_size)}
+					</div>
 				</div>
-				<div class="info-row">
-					<span class="label">Stored</span>
-					<span class="value">{formatSize(metadata.compressed_size)}</span>
+				<div class="rounded-box border border-base-300 bg-base-200 p-3">
+					<div class="text-xs text-base-content/50">Stored</div>
+					<div class="font-path mt-1 text-sm font-semibold">
+						{formatSize(metadata.compressed_size)}
+					</div>
 				</div>
 				{#if metadata.original_size > 0}
-					<div class="info-row">
-						<span class="label">Ratio</span>
-						<span class="value">
+					<div class="rounded-box border border-base-300 bg-base-200 p-3">
+						<div class="text-xs text-base-content/50">Ratio</div>
+						<div class="font-path mt-1 text-sm font-semibold">
 							{((metadata.compressed_size / metadata.original_size) * 100).toFixed(1)}%
-						</span>
+						</div>
 					</div>
 				{/if}
-				<div class="info-row">
-					<span class="label">Modified</span>
-					<span class="value">{formatTimestamp(metadata.modified)}</span>
+				<div class="rounded-box border border-base-300 bg-base-200 p-3">
+					<div class="text-xs text-base-content/50">Modified</div>
+					<div class="font-path mt-1 text-sm font-semibold">
+						{formatTimestamp(metadata.modified)}
+					</div>
 				</div>
-				<div class="info-row">
-					<span class="label">CID</span>
-					<span class="value mono">{cidString}</span>
+				<div class="rounded-box border border-base-300 bg-base-200 p-3 sm:col-span-2">
+					<div class="text-xs text-base-content/50">CID</div>
+					<div class="font-path mt-1 break-all text-sm font-semibold">{cidString}</div>
 				</div>
 			</div>
 
 			{#if duplicates.length > 1}
-				<div class="duplicates">
-					<div class="dup-header">
-						<span class="dup-icon">⚠</span>
-						<span>{duplicates.length} copies of this file</span>
-					</div>
-					<ul class="dup-list">
+				<div class="alert alert-error mt-4 block">
+					<div class="text-sm font-semibold">{duplicates.length} copies of this file</div>
+					<ul class="font-path mt-2 space-y-1 text-xs">
 						{#each duplicates as dup}
-							<li class:current={dup === path}>{dup}</li>
+							<li class={dup === path ? 'font-semibold text-error-content' : 'opacity-80'}>
+								{dup}
+							</li>
 						{/each}
 					</ul>
 				</div>
@@ -195,161 +213,3 @@
 		{/if}
 	</div>
 </div>
-
-<style>
-	.file-details {
-		height: 100%;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-	}
-
-	.header {
-		padding: 12px 16px;
-		border-bottom: 1px solid var(--app-border-color);
-	}
-
-	.title {
-		font-weight: 600;
-		font-size: 14px;
-	}
-
-	.content {
-		flex: 1;
-		overflow-y: auto;
-		padding: 16px;
-	}
-
-	.path-display {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		margin-bottom: 16px;
-		padding-bottom: 12px;
-		border-bottom: 1px solid var(--app-border-color);
-	}
-
-	.path-display .icon {
-		font-size: 20px;
-	}
-
-	.path-display .path {
-		font-family: var(--app-font-mono);
-		font-size: 13px;
-		word-break: break-all;
-	}
-
-	.info-grid {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-
-	.info-row {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		font-size: 13px;
-	}
-
-	.label {
-		color: var(--app-text-muted);
-	}
-
-	.value {
-		font-family: var(--app-font-mono);
-		font-size: 12px;
-	}
-
-	.mono {
-		font-family: var(--app-font-mono);
-	}
-
-	.loading {
-		color: var(--app-text-muted);
-		font-size: 13px;
-	}
-
-	.duplicates {
-		margin-top: 16px;
-		padding: 12px;
-		background: rgba(239, 83, 80, 0.1);
-		border: 1px solid rgba(239, 83, 80, 0.3);
-		border-radius: 6px;
-	}
-
-	.dup-header {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		font-size: 13px;
-		font-weight: 600;
-		color: var(--app-duplicate);
-		margin-bottom: 8px;
-	}
-
-	.dup-list {
-		list-style: none;
-		font-size: 12px;
-		font-family: var(--app-font-mono);
-	}
-
-	.dup-list li {
-		padding: 3px 0;
-		color: var(--app-text-muted);
-	}
-
-	.dup-list li.current {
-		color: var(--app-text);
-		font-weight: 600;
-	}
-
-	.image-preview {
-		margin-bottom: 16px;
-		padding-bottom: 12px;
-		border-bottom: 1px solid var(--app-border-color);
-		display: flex;
-		justify-content: center;
-		align-items: center;
-		background: var(--app-bg);
-		border-radius: 8px;
-		overflow: hidden;
-		min-height: 80px;
-	}
-
-	.image-preview img {
-		max-width: 100%;
-		max-height: 400px;
-		object-fit: contain;
-		display: block;
-	}
-
-	.image-preview.placeholder-img {
-		height: 120px;
-		color: var(--app-text-muted);
-		font-size: 12px;
-	}
-
-	.open-btn {
-		width: 100%;
-		padding: 8px 14px;
-		margin-bottom: 16px;
-		background: var(--app-accent);
-		border-radius: 6px;
-		font-size: 13px;
-		font-weight: 500;
-		cursor: pointer;
-		border: none;
-		color: var(--app-text);
-		transition: background 0.15s;
-	}
-
-	.open-btn:hover {
-		background: var(--app-accent-light);
-	}
-
-	.open-btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-</style>
