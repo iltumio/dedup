@@ -72,7 +72,7 @@
 		align-items: center;
 		justify-content: space-between;
 		padding: 12px 16px;
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid var(--app-border-color);
 	}
 
 	.title {
@@ -93,7 +93,7 @@
 	}
 
 	.action-btn:hover {
-		background: var(--bg-hover);
+		background: var(--app-bg-hover);
 	}
 
 	.tree-root {
@@ -104,13 +104,13 @@
 
 	.error {
 		padding: 16px;
-		color: var(--duplicate);
+		color: var(--app-duplicate);
 		font-size: 13px;
 	}
 
 	.empty {
 		padding: 16px;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		font-size: 13px;
 		display: flex;
 		flex-direction: column;
@@ -120,13 +120,13 @@
 
 	.empty-scan-btn {
 		padding: 6px 12px;
-		background: var(--accent);
+		background: var(--app-accent);
 		border-radius: 6px;
 		font-size: 12px;
 		font-weight: 500;
 	}
 
 	.empty-scan-btn:hover {
-		background: var(--accent-light);
+		background: var(--app-accent-light);
 	}
 </style>

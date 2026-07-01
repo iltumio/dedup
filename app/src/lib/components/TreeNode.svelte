@@ -105,11 +105,11 @@
 	}
 
 	.node-button:hover {
-		background: var(--bg-hover);
+		background: var(--app-bg-hover);
 	}
 
 	.node-button.selected {
-		background: var(--accent);
+		background: var(--app-accent);
 	}
 
 	.icon {
@@ -126,13 +126,13 @@
 
 	.size {
 		flex-shrink: 0;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		font-size: 11px;
-		font-family: var(--font-mono);
+		font-family: var(--app-font-mono);
 	}
 
 	.loading {
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		font-size: 11px;
 	}
 
@@ -144,8 +144,8 @@
 		width: 20px;
 		height: 20px;
 		border-radius: 3px;
-		background: var(--accent);
-		color: var(--text);
+		background: var(--app-accent);
+		color: var(--app-text);
 		font-size: 14px;
 		font-weight: bold;
 		line-height: 1;
@@ -155,7 +155,7 @@
 	}
 
 	.scan-into-btn:hover {
-		background: var(--accent-hover);
+		background: var(--app-accent-hover);
 	}
 
 	.node-button:hover .scan-into-btn {

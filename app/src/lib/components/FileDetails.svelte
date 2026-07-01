@@ -206,7 +206,7 @@
 
 	.header {
 		padding: 12px 16px;
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid var(--app-border-color);
 	}
 
 	.title {
@@ -226,7 +226,7 @@
 		gap: 8px;
 		margin-bottom: 16px;
 		padding-bottom: 12px;
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid var(--app-border-color);
 	}
 
 	.path-display .icon {
@@ -234,7 +234,7 @@
 	}
 
 	.path-display .path {
-		font-family: var(--font-mono);
+		font-family: var(--app-font-mono);
 		font-size: 13px;
 		word-break: break-all;
 	}
@@ -253,20 +253,20 @@
 	}
 
 	.label {
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 	}
 
 	.value {
-		font-family: var(--font-mono);
+		font-family: var(--app-font-mono);
 		font-size: 12px;
 	}
 
 	.mono {
-		font-family: var(--font-mono);
+		font-family: var(--app-font-mono);
 	}
 
 	.loading {
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		font-size: 13px;
 	}
 
@@ -284,34 +284,34 @@
 		gap: 6px;
 		font-size: 13px;
 		font-weight: 600;
-		color: var(--duplicate);
+		color: var(--app-duplicate);
 		margin-bottom: 8px;
 	}
 
 	.dup-list {
 		list-style: none;
 		font-size: 12px;
-		font-family: var(--font-mono);
+		font-family: var(--app-font-mono);
 	}
 
 	.dup-list li {
 		padding: 3px 0;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 	}
 
 	.dup-list li.current {
-		color: var(--text);
+		color: var(--app-text);
 		font-weight: 600;
 	}
 
 	.image-preview {
 		margin-bottom: 16px;
 		padding-bottom: 12px;
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid var(--app-border-color);
 		display: flex;
 		justify-content: center;
 		align-items: center;
-		background: var(--bg);
+		background: var(--app-bg);
 		border-radius: 8px;
 		overflow: hidden;
 		min-height: 80px;
@@ -326,7 +326,7 @@
 
 	.image-preview.placeholder-img {
 		height: 120px;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		font-size: 12px;
 	}
 
@@ -334,18 +334,18 @@
 		width: 100%;
 		padding: 8px 14px;
 		margin-bottom: 16px;
-		background: var(--accent);
+		background: var(--app-accent);
 		border-radius: 6px;
 		font-size: 13px;
 		font-weight: 500;
 		cursor: pointer;
 		border: none;
-		color: var(--text);
+		color: var(--app-text);
 		transition: background 0.15s;
 	}
 
 	.open-btn:hover {
-		background: var(--accent-light);
+		background: var(--app-accent-light);
 	}
 
 	.open-btn:disabled {

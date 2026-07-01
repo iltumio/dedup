@@ -202,26 +202,26 @@
 	.refresh-btn {
 		padding: 5px 12px;
 		font-size: 12px;
-		background: var(--bg);
-		border: 1px solid var(--border);
+		background: var(--app-bg);
+		border: 1px solid var(--app-border-color);
 		border-radius: 5px;
 		cursor: pointer;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 	}
 
 	.refresh-btn:hover {
-		border-color: var(--accent);
-		color: var(--text);
+		border-color: var(--app-accent);
+		color: var(--app-text);
 	}
 
 	.error {
-		color: var(--duplicate);
+		color: var(--app-duplicate);
 		font-size: 13px;
 	}
 
 	.loading,
 	.empty {
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		font-size: 13px;
 		text-align: center;
 		padding: 40px 0;
@@ -240,27 +240,27 @@
 		align-items: center;
 		gap: 4px;
 		padding: 14px 8px;
-		background: var(--bg);
-		border: 1px solid var(--border);
+		background: var(--app-bg);
+		border: 1px solid var(--app-border-color);
 		border-radius: 8px;
 	}
 
 	.card-value {
 		font-size: 18px;
 		font-weight: 700;
-		font-family: var(--font-mono);
+		font-family: var(--app-font-mono);
 	}
 
 	.card-label {
 		font-size: 11px;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 	}
 
 	/* Sort tabs */
 	.sort-tabs {
 		display: flex;
 		gap: 4px;
-		border-bottom: 1px solid var(--border);
+		border-bottom: 1px solid var(--app-border-color);
 		padding-bottom: 8px;
 	}
 
@@ -270,18 +270,18 @@
 		border-radius: 4px;
 		background: none;
 		border: 1px solid transparent;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		cursor: pointer;
 		transition: all 0.15s;
 	}
 
 	.sort-tabs button:hover {
-		color: var(--text);
+		color: var(--app-text);
 	}
 
 	.sort-tabs button.active {
-		background: var(--accent);
-		color: var(--text);
+		background: var(--app-accent);
+		color: var(--app-text);
 		font-weight: 500;
 	}
 
@@ -299,27 +299,27 @@
 		gap: 0 10px;
 		align-items: center;
 		padding: 8px 10px;
-		background: var(--bg);
-		border: 1px solid var(--border);
+		background: var(--app-bg);
+		border: 1px solid var(--app-border-color);
 		border-radius: 6px;
 	}
 
 	.rank-num {
 		font-size: 12px;
 		font-weight: 600;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		grid-row: 1 / 3;
 	}
 
 	.rank-ext {
 		font-size: 14px;
 		font-weight: 600;
-		font-family: var(--font-mono);
+		font-family: var(--app-font-mono);
 	}
 
 	.rank-bar-container {
 		height: 6px;
-		background: var(--border);
+		background: var(--app-border-color);
 		border-radius: 3px;
 		overflow: hidden;
 	}
@@ -331,21 +331,21 @@
 	}
 
 	.rank-bar.bar-saved {
-		background: var(--success);
+		background: var(--app-success);
 	}
 
 	.rank-bar.bar-dup {
-		background: var(--duplicate);
+		background: var(--app-duplicate);
 	}
 
 	.rank-bar.bar-files {
-		background: var(--accent-light);
+		background: var(--app-accent-light);
 	}
 
 	.rank-value {
 		font-size: 13px;
 		font-weight: 600;
-		font-family: var(--font-mono);
+		font-family: var(--app-font-mono);
 		text-align: right;
 		white-space: nowrap;
 	}
@@ -353,19 +353,19 @@
 	.rank-detail {
 		grid-column: 2 / -1;
 		font-size: 11px;
-		color: var(--text-muted);
-		font-family: var(--font-mono);
+		color: var(--app-text-muted);
+		font-family: var(--app-font-mono);
 		display: flex;
 		gap: 6px;
 	}
 
 	.highlight {
-		color: var(--duplicate);
+		color: var(--app-duplicate);
 		font-weight: 600;
 	}
 
 	.saved {
-		color: var(--success);
+		color: var(--app-success);
 		font-weight: 600;
 	}
 

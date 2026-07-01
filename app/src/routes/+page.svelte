@@ -801,8 +801,8 @@
 		align-items: center;
 		gap: 12px;
 		padding: 8px 16px;
-		background: var(--bg-secondary);
-		border-bottom: 1px solid var(--border);
+		background: var(--app-bg-secondary);
+		border-bottom: 1px solid var(--app-border-color);
 		flex-shrink: 0;
 	}
 
@@ -815,7 +815,7 @@
 	/* View toggle */
 	.view-toggle {
 		display: flex;
-		border: 1px solid var(--border);
+		border: 1px solid var(--app-border-color);
 		border-radius: 6px;
 		overflow: hidden;
 	}
@@ -823,10 +823,10 @@
 	.view-toggle button {
 		padding: 5px 12px;
 		font-size: 12px;
-		background: var(--bg);
+		background: var(--app-bg);
 		border: none;
-		border-right: 1px solid var(--border);
-		color: var(--text-muted);
+		border-right: 1px solid var(--app-border-color);
+		color: var(--app-text-muted);
 		cursor: pointer;
 		transition: all 0.15s;
 	}
@@ -836,12 +836,12 @@
 	}
 
 	.view-toggle button:hover {
-		color: var(--text);
+		color: var(--app-text);
 	}
 
 	.view-toggle button.active {
-		background: var(--accent);
-		color: var(--text);
+		background: var(--app-accent);
+		color: var(--app-text);
 		font-weight: 500;
 	}
 
@@ -851,8 +851,8 @@
 		align-items: center;
 		gap: 6px;
 		padding: 5px 12px;
-		background: var(--bg);
-		border: 1px solid var(--border);
+		background: var(--app-bg);
+		border: 1px solid var(--app-border-color);
 		border-radius: 6px;
 		font-size: 13px;
 		cursor: pointer;
@@ -860,7 +860,7 @@
 	}
 
 	.workspace-btn:hover {
-		border-color: var(--accent);
+		border-color: var(--app-accent);
 	}
 
 	.ws-label {
@@ -868,14 +868,14 @@
 	}
 
 	.ws-none {
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		font-style: italic;
 	}
 
 	.ws-tag {
 		display: inline-block;
 		padding: 1px 6px;
-		background: var(--accent);
+		background: var(--app-accent);
 		border-radius: 3px;
 		font-size: 10px;
 		font-weight: 500;
@@ -884,7 +884,7 @@
 
 	.scan-btn {
 		padding: 6px 14px;
-		background: var(--accent);
+		background: var(--app-accent);
 		border-radius: 6px;
 		font-size: 13px;
 		font-weight: 500;
@@ -892,7 +892,7 @@
 	}
 
 	.scan-btn:hover:not(:disabled) {
-		background: var(--accent-light);
+		background: var(--app-accent-light);
 	}
 
 	.scan-btn:disabled {
@@ -904,17 +904,17 @@
 		display: flex;
 		gap: 6px;
 		font-size: 12px;
-		color: var(--text-muted);
-		font-family: var(--font-mono);
+		color: var(--app-text-muted);
+		font-family: var(--app-font-mono);
 	}
 
 	.scan-stats .highlight {
-		color: var(--duplicate);
+		color: var(--app-duplicate);
 		font-weight: 600;
 	}
 
 	.scan-stats .saved {
-		color: var(--success);
+		color: var(--app-success);
 		font-weight: 600;
 	}
 
@@ -930,7 +930,7 @@
 
 	.sidebar {
 		width: 320px;
-		border-right: 1px solid var(--border);
+		border-right: 1px solid var(--app-border-color);
 		overflow: hidden;
 	}
 
@@ -944,7 +944,7 @@
 		align-items: center;
 		justify-content: center;
 		height: 100%;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		font-size: 14px;
 	}
 
@@ -970,7 +970,7 @@
 	}
 
 	.no-ws-content p {
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		font-size: 14px;
 	}
 
@@ -986,8 +986,8 @@
 	}
 
 	.dialog-content {
-		background: var(--bg-secondary);
-		border: 1px solid var(--border);
+		background: var(--app-bg-secondary);
+		border: 1px solid var(--app-border-color);
 		border-radius: 12px;
 		padding: 24px;
 		width: min(480px, calc(100vw - 32px));
@@ -1017,7 +1017,7 @@
 	}
 
 	.dialog-content label span {
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 	}
 
 	.hint {
@@ -1026,17 +1026,17 @@
 	}
 
 	.dialog-content input {
-		background: var(--bg);
-		border: 1px solid var(--border);
+		background: var(--app-bg);
+		border: 1px solid var(--app-border-color);
 		border-radius: 6px;
 		padding: 8px 12px;
 		font-size: 13px;
-		font-family: var(--font-mono);
+		font-family: var(--app-font-mono);
 	}
 
 	.dialog-content input:focus {
 		outline: none;
-		border-color: var(--accent-light);
+		border-color: var(--app-accent-light);
 	}
 
 	.dialog-content input:disabled {
@@ -1082,17 +1082,17 @@
 	.rule-remove {
 		margin-left: auto;
 		padding: 4px 8px;
-		background: var(--bg);
-		border: 1px solid var(--border);
+		background: var(--app-bg);
+		border: 1px solid var(--app-border-color);
 		border-radius: 6px;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		font-size: 12px;
 		flex-shrink: 0;
 	}
 
 	.rule-remove:hover:not(:disabled) {
-		border-color: var(--duplicate);
-		color: var(--duplicate);
+		border-color: var(--app-duplicate);
+		color: var(--app-duplicate);
 	}
 
 	.custom-rule-editor {
@@ -1107,8 +1107,8 @@
 	}
 
 	.custom-rule-editor select {
-		background: var(--bg);
-		border: 1px solid var(--border);
+		background: var(--app-bg);
+		border: 1px solid var(--app-border-color);
 		border-radius: 6px;
 		padding: 8px 10px;
 		font-size: 13px;
@@ -1134,21 +1134,21 @@
 		flex-direction: column;
 		gap: 10px;
 		padding: 12px;
-		background: var(--bg);
+		background: var(--app-bg);
 		border-radius: 8px;
-		border: 1px solid var(--border);
+		border: 1px solid var(--app-border-color);
 	}
 
 	.progress-bar-track {
 		height: 6px;
-		background: var(--border);
+		background: var(--app-border-color);
 		border-radius: 3px;
 		overflow: hidden;
 	}
 
 	.progress-bar-fill {
 		height: 100%;
-		background: var(--accent-light);
+		background: var(--app-accent-light);
 		border-radius: 3px;
 		transition: width 0.3s;
 	}
@@ -1176,28 +1176,28 @@
 	}
 
 	.stat-label {
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 	}
 
 	.stat-value {
-		font-family: var(--font-mono);
+		font-family: var(--app-font-mono);
 		font-size: 11px;
 	}
 
 	.stat-value.highlight {
-		color: var(--duplicate);
+		color: var(--app-duplicate);
 		font-weight: 600;
 	}
 
 	.stat-value.saved {
-		color: var(--success);
+		color: var(--app-success);
 		font-weight: 600;
 	}
 
 	.current-file {
 		font-size: 11px;
-		color: var(--text-muted);
-		font-family: var(--font-mono);
+		color: var(--app-text-muted);
+		font-family: var(--app-font-mono);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -1221,27 +1221,27 @@
 	}
 
 	.cancel {
-		background: var(--bg);
-		border: 1px solid var(--border);
+		background: var(--app-bg);
+		border: 1px solid var(--app-border-color);
 	}
 
 	.secondary {
-		background: var(--bg);
-		border: 1px solid var(--border);
-		color: var(--text-muted);
+		background: var(--app-bg);
+		border: 1px solid var(--app-border-color);
+		color: var(--app-text-muted);
 	}
 
 	.secondary:hover {
-		border-color: var(--accent);
-		color: var(--text);
+		border-color: var(--app-accent);
+		color: var(--app-text);
 	}
 
 	.primary {
-		background: var(--accent);
+		background: var(--app-accent);
 	}
 
 	.primary:hover {
-		background: var(--accent-light);
+		background: var(--app-accent-light);
 	}
 
 	.primary:disabled {
@@ -1250,7 +1250,7 @@
 	}
 
 	.error {
-		color: var(--duplicate);
+		color: var(--app-duplicate);
 		font-size: 13px;
 	}
 
@@ -1258,7 +1258,7 @@
 	.ws-empty {
 		text-align: center;
 		padding: 24px;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		font-size: 13px;
 	}
 
@@ -1273,18 +1273,18 @@
 		display: flex;
 		align-items: center;
 		gap: 8px;
-		border: 1px solid var(--border);
+		border: 1px solid var(--app-border-color);
 		border-radius: 8px;
 		overflow: hidden;
 		transition: border-color 0.15s;
 	}
 
 	.ws-item:hover {
-		border-color: var(--accent);
+		border-color: var(--app-accent);
 	}
 
 	.ws-item.active {
-		border-color: var(--accent-light);
+		border-color: var(--app-accent-light);
 		background: rgba(69, 160, 165, 0.08);
 	}
 
@@ -1307,8 +1307,8 @@
 
 	.ws-item-path {
 		font-size: 11px;
-		font-family: var(--font-mono);
-		color: var(--text-muted);
+		font-family: var(--app-font-mono);
+		color: var(--app-text-muted);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -1324,18 +1324,18 @@
 		display: flex;
 		gap: 6px;
 		font-size: 11px;
-		color: var(--text-muted);
-		font-family: var(--font-mono);
+		color: var(--app-text-muted);
+		font-family: var(--app-font-mono);
 		margin-top: 2px;
 	}
 
 	.ws-item-stats .highlight {
-		color: var(--duplicate);
+		color: var(--app-duplicate);
 		font-weight: 600;
 	}
 
 	.ws-item-stats .saved {
-		color: var(--success);
+		color: var(--app-success);
 		font-weight: 600;
 	}
 
@@ -1347,7 +1347,7 @@
 		background: none;
 		border: none;
 		font-size: 18px;
-		color: var(--text-muted);
+		color: var(--app-text-muted);
 		cursor: pointer;
 		display: flex;
 		align-items: center;
@@ -1357,6 +1357,6 @@
 
 	.ws-delete-btn:hover {
 		background: rgba(239, 83, 80, 0.15);
-		color: var(--duplicate);
+		color: var(--app-duplicate);
 	}
 </style>
