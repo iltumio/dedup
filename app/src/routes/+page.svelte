@@ -455,7 +455,7 @@
 	onScan={() => openScanDialog()}
 >
 	{#snippet workspaceControl()}
-		<button class="btn btn-neutral btn-sm max-w-72 justify-start" type="button" onclick={openWorkspaceManager}>
+		<button class="btn btn-neutral btn-sm min-w-0 max-w-72 w-full justify-start" type="button" onclick={openWorkspaceManager}>
 			{#if activeWorkspace}
 				<span class="truncate">{activeWorkspace.label}</span>
 			{:else}
