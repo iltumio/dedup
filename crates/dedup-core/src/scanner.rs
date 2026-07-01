@@ -1,6 +1,6 @@
 use std::fs;
-use std::io::Write;
-use std::path::Path;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{bail, Context, Result};
@@ -125,8 +125,6 @@ where
     F: Fn(&ScanProgress),
     C: Fn() -> bool,
 {
-    let _ = options;
-
     let source = source
         .canonicalize()
         .with_context(|| format!("source directory not found: {}", source.display()))?;
@@ -199,7 +197,8 @@ where
         }};
     }
 
-    for entry in WalkDir::new(&source).follow_links(false) {
+    let mut walker = WalkDir::new(&source).follow_links(false).into_iter();
+    while let Some(entry) = walker.next() {
         if should_cancel() {
             bail!("scan cancelled");
         }
@@ -255,6 +254,63 @@ where
             }
         };
 
+        if options.bundle_git_dirs
+            && fs_meta.is_dir()
+            && abs_path
+                .file_name()
+                .map(|name| name == ".git")
+                .unwrap_or(false)
+        {
+            let archive_virtual_path = format!("{virtual_path}.tar");
+            let archive_data = match build_git_directory_archive(abs_path, &should_cancel) {
+                Ok(data) => data,
+                Err(err) => {
+                    if err.to_string().contains("scan cancelled") {
+                        return Err(err);
+                    }
+
+                    let msg = format!("failed to archive .git directory: {err}");
+                    (|| {
+                        log_error!(
+                            &mut error_log,
+                            error_log_path,
+                            msg,
+                            archive_virtual_path.clone()
+                        )
+                    })();
+                    stats.skipped_files += 1;
+                    on_progress(&ScanProgress {
+                        files_processed: stats.total_files,
+                        dirs_processed: stats.total_dirs,
+                        bytes_processed: stats.total_original_bytes,
+                        bytes_stored: stats.total_stored_bytes,
+                        duplicates_found: stats.duplicate_files,
+                        skipped_files: stats.skipped_files,
+                        current_file: archive_virtual_path,
+                    });
+                    walker.skip_current_dir();
+                    continue;
+                }
+            };
+
+            let modified = extract_mtime(&fs_meta);
+            let created = extract_ctime(&fs_meta);
+            store_virtual_file(
+                &archive_virtual_path,
+                &archive_data,
+                modified,
+                created,
+                0o644,
+                content_store,
+                metadata_db,
+                &mut stats,
+                &on_progress,
+            )?;
+
+            walker.skip_current_dir();
+            continue;
+        }
+
         if fs_meta.is_dir() {
             let modified = extract_mtime(&fs_meta);
 
@@ -289,28 +345,8 @@ where
                 }
             };
 
-            let cid = cid_util::compute_cid(&data);
-            let cid_str = cid_util::cid_to_string(&cid);
-
-            let was_new = !content_store.exists(&cid);
-            let compressed_size = content_store
-                .store(&cid, &data)
-                .with_context(|| format!("failed to store blob for: {virtual_path}"))?;
-
-            if was_new {
-                stats.unique_blobs += 1;
-                stats.total_stored_bytes += compressed_size;
-            } else {
-                stats.duplicate_files += 1;
-            }
-
             let modified = extract_mtime(&fs_meta);
-            let created = fs_meta
-                .created()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+            let created = extract_ctime(&fs_meta);
 
             #[cfg(unix)]
             let permissions = {
@@ -320,32 +356,17 @@ where
             #[cfg(not(unix))]
             let permissions = 0o644u32;
 
-            let file_meta = FileMetadata {
-                cid: cid_util::cid_to_bytes(&cid),
-                original_size: data.len() as u64,
-                compressed_size,
+            store_virtual_file(
+                &virtual_path,
+                &data,
                 modified,
                 created,
                 permissions,
-            };
-
-            metadata_db
-                .insert_file(&virtual_path, &file_meta, &cid_str)
-                .with_context(|| format!("failed to insert metadata for: {virtual_path}"))?;
-
-            stats.total_files += 1;
-            stats.total_original_bytes += data.len() as u64;
-
-            // Emit progress
-            on_progress(&ScanProgress {
-                files_processed: stats.total_files,
-                dirs_processed: stats.total_dirs,
-                bytes_processed: stats.total_original_bytes,
-                bytes_stored: stats.total_stored_bytes,
-                duplicates_found: stats.duplicate_files,
-                skipped_files: stats.skipped_files,
-                current_file: virtual_path,
-            });
+                content_store,
+                metadata_db,
+                &mut stats,
+                &on_progress,
+            )?;
         }
         // Skip symlinks, special files, etc.
     }
@@ -356,6 +377,164 @@ where
     }
 
     Ok(stats)
+}
+
+struct GitArchiveEntry {
+    archive_path: String,
+    source_path: PathBuf,
+    is_dir: bool,
+}
+
+fn build_git_directory_archive<C>(git_dir: &Path, should_cancel: &C) -> Result<Vec<u8>>
+where
+    C: Fn() -> bool,
+{
+    let mut entries = Vec::new();
+
+    for entry in WalkDir::new(git_dir).follow_links(false).min_depth(1) {
+        if should_cancel() {
+            bail!("scan cancelled");
+        }
+
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read .git archive entry under {}",
+                git_dir.display()
+            )
+        })?;
+        let file_type = entry.file_type();
+
+        if !file_type.is_file() && !file_type.is_dir() {
+            continue;
+        }
+
+        let relative = entry.path().strip_prefix(git_dir).with_context(|| {
+            format!(
+                "failed to compute .git archive path for {}",
+                entry.path().display()
+            )
+        })?;
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        entries.push(GitArchiveEntry {
+            archive_path: format!(".git/{relative}"),
+            source_path: entry.path().to_path_buf(),
+            is_dir: file_type.is_dir(),
+        });
+    }
+
+    entries.sort_by(|left, right| left.archive_path.cmp(&right.archive_path));
+
+    let mut archive = tar::Builder::new(Vec::new());
+    for entry in entries {
+        if should_cancel() {
+            bail!("scan cancelled");
+        }
+
+        if entry.is_dir {
+            let mut header = deterministic_tar_header(0, 0o755, tar::EntryType::Directory)?;
+            archive
+                .append_data(&mut header, Path::new(&entry.archive_path), io::empty())
+                .with_context(|| format!("failed to append archive dir: {}", entry.archive_path))?;
+        } else {
+            let data = fs::read(&entry.source_path).with_context(|| {
+                format!(
+                    "failed to read .git archive file: {}",
+                    entry.source_path.display()
+                )
+            })?;
+
+            if should_cancel() {
+                bail!("scan cancelled");
+            }
+
+            let mut header =
+                deterministic_tar_header(data.len() as u64, 0o644, tar::EntryType::Regular)?;
+            archive
+                .append_data(&mut header, Path::new(&entry.archive_path), data.as_slice())
+                .with_context(|| {
+                    format!("failed to append archive file: {}", entry.archive_path)
+                })?;
+        }
+    }
+
+    archive
+        .into_inner()
+        .context("failed to finish .git directory archive")
+}
+
+fn deterministic_tar_header(
+    size: u64,
+    mode: u32,
+    entry_type: tar::EntryType,
+) -> Result<tar::Header> {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(size);
+    header.set_mode(mode);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_username("")?;
+    header.set_groupname("")?;
+    header.set_entry_type(entry_type);
+    Ok(header)
+}
+
+fn store_virtual_file<F>(
+    virtual_path: &str,
+    data: &[u8],
+    modified: i64,
+    created: i64,
+    permissions: u32,
+    content_store: &ContentStore,
+    metadata_db: &MetadataDb,
+    stats: &mut ScanStats,
+    on_progress: &F,
+) -> Result<()>
+where
+    F: Fn(&ScanProgress),
+{
+    let cid = cid_util::compute_cid(data);
+    let cid_str = cid_util::cid_to_string(&cid);
+
+    let was_new = !content_store.exists(&cid);
+    let compressed_size = content_store
+        .store(&cid, data)
+        .with_context(|| format!("failed to store blob for: {virtual_path}"))?;
+
+    if was_new {
+        stats.unique_blobs += 1;
+        stats.total_stored_bytes += compressed_size;
+    } else {
+        stats.duplicate_files += 1;
+    }
+
+    let file_meta = FileMetadata {
+        cid: cid_util::cid_to_bytes(&cid),
+        original_size: data.len() as u64,
+        compressed_size,
+        modified,
+        created,
+        permissions,
+    };
+
+    metadata_db
+        .insert_file(virtual_path, &file_meta, &cid_str)
+        .with_context(|| format!("failed to insert metadata for: {virtual_path}"))?;
+
+    stats.total_files += 1;
+    stats.total_original_bytes += data.len() as u64;
+
+    on_progress(&ScanProgress {
+        files_processed: stats.total_files,
+        dirs_processed: stats.total_dirs,
+        bytes_processed: stats.total_original_bytes,
+        bytes_stored: stats.total_stored_bytes,
+        duplicates_found: stats.duplicate_files,
+        skipped_files: stats.skipped_files,
+        current_file: virtual_path.to_string(),
+    });
+
+    Ok(())
 }
 
 /// Ensure all ancestor directories of `path` exist in the metadata db.
@@ -382,6 +561,14 @@ fn ensure_parent_dirs(metadata_db: &MetadataDb, path: &str) -> Result<()> {
 
 fn extract_mtime(meta: &fs::Metadata) -> i64 {
     meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn extract_ctime(meta: &fs::Metadata) -> i64 {
+    meta.created()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
@@ -461,6 +648,67 @@ mod tests {
         assert_eq!(stats.total_files, 1);
         assert!(metadata_db.get_file("/repo/.git/HEAD").unwrap().is_some());
         assert!(metadata_db.get_file("/repo/.git.tar").unwrap().is_none());
+    }
+
+    #[test]
+    fn bundle_git_dirs_stores_single_git_tar_file() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir(source_dir.path().join(".git")).unwrap();
+        fs::write(
+            source_dir.path().join(".git/HEAD"),
+            b"ref: refs/heads/main\n",
+        )
+        .unwrap();
+        fs::create_dir_all(source_dir.path().join(".git/refs/heads")).unwrap();
+        fs::write(source_dir.path().join(".git/refs/heads/main"), b"abc123\n").unwrap();
+        fs::write(source_dir.path().join("tracked.txt"), b"tracked\n").unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                bundle_git_dirs: true,
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 2);
+        assert!(metadata_db.get_file("/repo/tracked.txt").unwrap().is_some());
+
+        let git_tar_meta = metadata_db
+            .get_file("/repo/.git.tar")
+            .unwrap()
+            .expect("expected .git.tar metadata");
+        assert!(metadata_db.get_file("/repo/.git/HEAD").unwrap().is_none());
+        assert!(metadata_db
+            .get_file("/repo/.git/refs/heads/main")
+            .unwrap()
+            .is_none());
+
+        let git_tar_cid = cid_util::cid_from_bytes(&git_tar_meta.cid).unwrap();
+        let git_tar_data = content_store.read(&git_tar_cid).unwrap();
+        let mut archive = tar::Archive::new(std::io::Cursor::new(git_tar_data));
+        let mut archive_paths: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        archive_paths.sort();
+
+        assert!(archive_paths.contains(&".git/HEAD".to_string()));
+        assert!(archive_paths.contains(&".git/refs/heads/main".to_string()));
     }
 
     #[test]
