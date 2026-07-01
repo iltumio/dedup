@@ -2,6 +2,7 @@
 	import FileTree from '$lib/components/FileTree.svelte';
 	import FileDetails from '$lib/components/FileDetails.svelte';
 	import StatsPage from '$lib/components/StatsPage.svelte';
+	import AppShell from '$lib/components/AppShell.svelte';
 	import {
 		scanDirectory,
 		cancelScan,
@@ -80,6 +81,15 @@
 	let aggStored = $derived(workspacesConfig.workspaces.reduce((s, w) => s + w.stats.total_stored_bytes, 0));
 	let aggSavedBytes = $derived(aggOriginal - aggStored);
 	let aggSavedPct = $derived(aggOriginal > 0 ? ((1 - aggStored / aggOriginal) * 100).toFixed(1) : '0.0');
+	let shellStats = $derived(
+		aggFiles > 0
+			? [
+					{ label: 'Files', value: aggFiles },
+					{ label: 'Duplicates', value: aggDuplicates, tone: 'error' as const },
+					{ label: 'Saved', value: `${formatSize(aggSavedBytes)} (${aggSavedPct}%)`, tone: 'success' as const }
+				]
+			: []
+	);
 
 	// Load workspaces on mount
 	$effect(() => {
@@ -415,43 +425,23 @@
 	);
 </script>
 
-<div class="app">
-	<header class="toolbar">
-		<h1 class="logo">dedup</h1>
-
-		<button class="workspace-btn" onclick={openWorkspaceManager}>
+<AppShell
+	{currentView}
+	{hasWorkspace}
+	{scanning}
+	stats={shellStats}
+	onViewChange={(view) => (currentView = view)}
+	onScan={() => openScanDialog()}
+>
+	{#snippet workspaceControl()}
+		<button class="btn btn-neutral btn-sm max-w-72 justify-start" type="button" onclick={openWorkspaceManager}>
 			{#if activeWorkspace}
-				<span class="ws-label">{activeWorkspace.label}</span>
-				{#each activeWorkspace.tags.slice(0, 2) as tag}
-					<span class="ws-tag">{tag}</span>
-				{/each}
+				<span class="truncate">{activeWorkspace.label}</span>
 			{:else}
-				<span class="ws-none">No workspace</span>
+				<span class="text-base-content/50">No workspace</span>
 			{/if}
 		</button>
-
-		<button class="scan-btn" onclick={() => openScanDialog()} disabled={!hasWorkspace || scanning}>
-			Scan Directory
-		</button>
-
-
-		{#if hasWorkspace}
-			<div class="view-toggle">
-				<button class:active={currentView === 'files'} onclick={() => (currentView = 'files')}>Files</button>
-				<button class:active={currentView === 'stats'} onclick={() => (currentView = 'stats')}>Stats</button>
-			</div>
-		{/if}
-
-		{#if aggFiles > 0}
-			<div class="scan-stats">
-				<span>{aggFiles} files</span>
-				<span class="sep">·</span>
-				<span class="highlight">{aggDuplicates} duplicates</span>
-				<span class="sep">·</span>
-				<span class="saved">saved {formatSize(aggSavedBytes)} ({aggSavedPct}%)</span>
-			</div>
-		{/if}
-	</header>
+	{/snippet}
 
 	<!-- Scan Dialog -->
 	{#if showScanDialog}
@@ -787,91 +777,9 @@
 			</section>
 		{/if}
 	</main>
-</div>
+</AppShell>
 
 <style>
-	.app {
-		display: flex;
-		flex-direction: column;
-		height: 100vh;
-	}
-
-	.toolbar {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding: 8px 16px;
-		background: var(--app-bg-secondary);
-		border-bottom: 1px solid var(--app-border-color);
-		flex-shrink: 0;
-	}
-
-	.logo {
-		font-size: 16px;
-		font-weight: 700;
-		letter-spacing: -0.5px;
-	}
-
-	/* View toggle */
-	.view-toggle {
-		display: flex;
-		border: 1px solid var(--app-border-color);
-		border-radius: 6px;
-		overflow: hidden;
-	}
-
-	.view-toggle button {
-		padding: 5px 12px;
-		font-size: 12px;
-		background: var(--app-bg);
-		border: none;
-		border-right: 1px solid var(--app-border-color);
-		color: var(--app-text-muted);
-		cursor: pointer;
-		transition: all 0.15s;
-	}
-
-	.view-toggle button:last-child {
-		border-right: none;
-	}
-
-	.view-toggle button:hover {
-		color: var(--app-text);
-	}
-
-	.view-toggle button.active {
-		background: var(--app-accent);
-		color: var(--app-text);
-		font-weight: 500;
-	}
-
-	/* Workspace button */
-	.workspace-btn {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		padding: 5px 12px;
-		background: var(--app-bg);
-		border: 1px solid var(--app-border-color);
-		border-radius: 6px;
-		font-size: 13px;
-		cursor: pointer;
-		transition: border-color 0.15s;
-	}
-
-	.workspace-btn:hover {
-		border-color: var(--app-accent);
-	}
-
-	.ws-label {
-		font-weight: 500;
-	}
-
-	.ws-none {
-		color: var(--app-text-muted);
-		font-style: italic;
-	}
-
 	.ws-tag {
 		display: inline-block;
 		padding: 1px 6px;
@@ -880,42 +788,6 @@
 		font-size: 10px;
 		font-weight: 500;
 		opacity: 0.8;
-	}
-
-	.scan-btn {
-		padding: 6px 14px;
-		background: var(--app-accent);
-		border-radius: 6px;
-		font-size: 13px;
-		font-weight: 500;
-		transition: background 0.15s;
-	}
-
-	.scan-btn:hover:not(:disabled) {
-		background: var(--app-accent-light);
-	}
-
-	.scan-btn:disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
-	}
-
-	.scan-stats {
-		display: flex;
-		gap: 6px;
-		font-size: 12px;
-		color: var(--app-text-muted);
-		font-family: var(--app-font-mono);
-	}
-
-	.scan-stats .highlight {
-		color: var(--app-duplicate);
-		font-weight: 600;
-	}
-
-	.scan-stats .saved {
-		color: var(--app-success);
-		font-weight: 600;
 	}
 
 	.sep {
