@@ -60,9 +60,10 @@ export async function findDuplicates(path: string): Promise<string[]> {
 
 export async function scanDirectory(
 	source: string,
-	targetPath: string
+	targetPath: string,
+	bundleGitDirs = false
 ): Promise<ScanStats> {
-	return invoke('scan_directory', { source, targetPath });
+	return invoke('scan_directory', { source, targetPath, bundleGitDirs });
 }
 
 export async function cancelScan(): Promise<void> {

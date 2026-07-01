@@ -27,6 +27,7 @@
 	let selectedEntry = $state<DirEntry | null>(null);
 	let scanSource = $state('');
 	let targetPath = $state('/');
+	let bundleGitDirs = $state(false);
 	let scanning = $state(false);
 	let cancelling = $state(false);
 	let scanResult = $state<ScanStats | null>(null);
@@ -200,6 +201,7 @@
 
 	function openScanDialog(presetTarget?: string) {
 		targetPath = presetTarget ?? '/';
+		bundleGitDirs = false;
 		scanError = null;
 		progress = null;
 		showScanDialog = true;
@@ -219,7 +221,7 @@
 				progress = p;
 			});
 
-			scanResult = await scanDirectory(scanSource, targetPath);
+			scanResult = await scanDirectory(scanSource, targetPath, bundleGitDirs);
 			showScanDialog = false;
 			treeRefreshKey++;
 			// Refresh workspace stats
@@ -327,6 +329,10 @@
 						disabled={scanning}
 					/>
 					<span class="hint">Use "/" for root, or e.g. "/photos/vacation" to nest</span>
+				</label>
+				<label class="checkbox-row">
+					<input type="checkbox" bind:checked={bundleGitDirs} disabled={scanning} />
+					<span>Bundle .git directories</span>
 				</label>
 
 				{#if scanning && progress}
@@ -810,6 +816,19 @@
 
 	.dialog-content input:disabled {
 		opacity: 0.5;
+	}
+
+	.checkbox-row {
+		flex-direction: row !important;
+		align-items: center;
+		gap: 8px !important;
+	}
+
+	.checkbox-row input {
+		width: 14px;
+		height: 14px;
+		padding: 0;
+		margin: 0;
 	}
 
 	/* Progress */
