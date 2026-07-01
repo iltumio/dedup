@@ -5,7 +5,7 @@ use std::sync::{
 };
 
 use dedup_core::{
-    DirEntry, ExtensionStats, FileMetadata, ScanOptions, ScanProgress, ScanStats, Store,
+    DirEntry, ExtensionStats, FileMetadata, ScanOptions, ScanProgress, ScanRule, ScanStats, Store,
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -167,8 +167,13 @@ pub async fn scan_directory(
     source: String,
     target_path: String,
     bundle_git_dirs: Option<bool>,
+    rules: Option<Vec<ScanRule>>,
 ) -> Result<ScanStats, String> {
     let bundle_git_dirs = bundle_git_dirs.unwrap_or(false);
+    let mut rules = rules.unwrap_or_default();
+    if bundle_git_dirs {
+        rules.insert(0, ScanRule::builtin(dedup_core::BuiltinScanPreset::Git));
+    }
     state.scan_cancelled.store(false, Ordering::Relaxed);
 
     let store_path_buf = state.store_path.lock().map_err(|e| e.to_string())?.clone();
@@ -192,8 +197,8 @@ pub async fn scan_directory(
                 &source_path,
                 &target_path,
                 ScanOptions {
-                    bundle_git_dirs,
-                    ..ScanOptions::default()
+                    bundle_git_dirs: false,
+                    rules,
                 },
                 move |progress: &ScanProgress| {
                     let _ = app.emit("scan-progress", progress.clone());

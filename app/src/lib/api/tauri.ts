@@ -38,6 +38,13 @@ export interface ScanProgress {
 	current_file: string;
 }
 
+export type ScanRuleAction = 'ignore' | 'archive';
+
+export interface ScanRule {
+	pattern: string;
+	action: ScanRuleAction;
+}
+
 export async function listDir(path: string): Promise<DirEntry[]> {
 	return invoke('list_dir', { path });
 }
@@ -61,9 +68,10 @@ export async function findDuplicates(path: string): Promise<string[]> {
 export async function scanDirectory(
 	source: string,
 	targetPath: string,
-	bundleGitDirs = false
+	bundleGitDirs = false,
+	rules: ScanRule[] = []
 ): Promise<ScanStats> {
-	return invoke('scan_directory', { source, targetPath, bundleGitDirs });
+	return invoke('scan_directory', { source, targetPath, bundleGitDirs, rules });
 }
 
 export async function cancelScan(): Promise<void> {

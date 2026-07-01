@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use dedup_core::{ScanOptions, Store};
+use dedup_core::{BuiltinScanPreset, ScanOptions, ScanRule, ScanRuleAction, Store};
 
 #[derive(Parser)]
 #[command(name = "dedup", about = "Content-addressed file deduplication tool")]
@@ -33,6 +33,26 @@ enum Commands {
         /// Bundle each .git directory into one .git.tar archive blob.
         #[arg(long)]
         bundle_git_dirs: bool,
+
+        /// Ignore directories named target.
+        #[arg(long)]
+        ignore_rust_target: bool,
+
+        /// Ignore directories named node_modules.
+        #[arg(long)]
+        ignore_node_modules: bool,
+
+        /// Ignore directories named .venv or venv.
+        #[arg(long)]
+        ignore_python_venv: bool,
+
+        /// Ignore paths matching this full scan-relative regex. Repeatable.
+        #[arg(long = "ignore-regex")]
+        ignore_regexes: Vec<String>,
+
+        /// Archive directories matching this full scan-relative regex. Repeatable.
+        #[arg(long = "archive-regex")]
+        archive_regexes: Vec<String>,
     },
 
     /// List contents of a virtual directory in the store.
@@ -87,7 +107,24 @@ fn main() -> Result<()> {
             store,
             target,
             bundle_git_dirs,
-        } => cmd_scan(&source, &store, &target, bundle_git_dirs),
+            ignore_rust_target,
+            ignore_node_modules,
+            ignore_python_venv,
+            ignore_regexes,
+            archive_regexes,
+        } => cmd_scan(
+            &source,
+            &store,
+            &target,
+            PresetFlags {
+                bundle_git_dirs,
+                ignore_rust_target,
+                ignore_node_modules,
+                ignore_python_venv,
+            },
+            &ignore_regexes,
+            &archive_regexes,
+        ),
         Commands::Ls { path, store } => cmd_ls(&path, &store),
         Commands::Info { path, store } => cmd_info(&path, &store),
         Commands::Duplicates { store } => cmd_duplicates(&store),
@@ -99,17 +136,78 @@ fn main() -> Result<()> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PresetFlags {
+    bundle_git_dirs: bool,
+    ignore_rust_target: bool,
+    ignore_node_modules: bool,
+    ignore_python_venv: bool,
+}
+
+fn build_scan_rules(
+    presets: PresetFlags,
+    ignore_regexes: &[String],
+    archive_regexes: &[String],
+) -> Vec<ScanRule> {
+    let mut rules = Vec::new();
+
+    if presets.bundle_git_dirs {
+        rules.push(ScanRule::builtin(BuiltinScanPreset::Git));
+    }
+    if presets.ignore_rust_target {
+        rules.push(ScanRule::builtin(BuiltinScanPreset::RustTarget));
+    }
+    if presets.ignore_node_modules {
+        rules.push(ScanRule::builtin(BuiltinScanPreset::NodeModules));
+    }
+    if presets.ignore_python_venv {
+        rules.push(ScanRule::builtin(BuiltinScanPreset::PythonVenv));
+    }
+
+    rules.extend(
+        ignore_regexes
+            .iter()
+            .cloned()
+            .map(|pattern| ScanRule::new(pattern, ScanRuleAction::Ignore)),
+    );
+    rules.extend(
+        archive_regexes
+            .iter()
+            .cloned()
+            .map(|pattern| ScanRule::new(pattern, ScanRuleAction::Archive)),
+    );
+
+    rules
+}
+
 fn cmd_scan(
     source: &PathBuf,
     store_path: &PathBuf,
     target: &str,
-    bundle_git_dirs: bool,
+    presets: PresetFlags,
+    ignore_regexes: &[String],
+    archive_regexes: &[String],
 ) -> Result<()> {
     println!("Scanning: {}", source.display());
     println!("Store:    {}", store_path.display());
     println!("Target:   {target}");
-    if bundle_git_dirs {
-        println!("Git dirs: bundled as .git.tar");
+    if presets.bundle_git_dirs {
+        println!("Git dirs: archived as .git.tar");
+    }
+    if presets.ignore_rust_target {
+        println!("Rust target: ignored");
+    }
+    if presets.ignore_node_modules {
+        println!("Node modules: ignored");
+    }
+    if presets.ignore_python_venv {
+        println!("Python virtual envs: ignored");
+    }
+    for pattern in ignore_regexes {
+        println!("Ignore regex: {pattern}");
+    }
+    for pattern in archive_regexes {
+        println!("Archive regex: {pattern}");
     }
     println!();
 
@@ -117,14 +215,15 @@ fn cmd_scan(
 
     let last_file = std::sync::Mutex::new(String::new());
     let files_count = AtomicU64::new(0);
+    let rules = build_scan_rules(presets, ignore_regexes, archive_regexes);
 
     let stats = store
         .scan_into_with_options(
             source,
             target,
             ScanOptions {
-                bundle_git_dirs,
-                ..ScanOptions::default()
+                bundle_git_dirs: false,
+                rules,
             },
             |progress| {
                 files_count.store(progress.files_processed, Ordering::Relaxed);
