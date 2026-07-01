@@ -381,20 +381,11 @@ where
             }
         }
 
-        if options.bundle_git_dirs && has_real_sibling_git_dir_for_git_tar_collision(abs_path) {
-            let msg = "virtual path collision: .git.tar is reserved for bundled .git directory"
-                .to_string();
+        if has_sibling_archive_source_for_rule(&source, &rel_str, &compiled_rules) {
+            let msg = "virtual path collision: .tar is reserved for archived directory".to_string();
             (|| log_error!(&mut error_log, error_log_path, msg, virtual_path.clone()))();
             stats.skipped_files += 1;
-            on_progress(&ScanProgress {
-                files_processed: stats.total_files,
-                dirs_processed: stats.total_dirs,
-                bytes_processed: stats.total_original_bytes,
-                bytes_stored: stats.total_stored_bytes,
-                duplicates_found: stats.duplicate_files,
-                skipped_files: stats.skipped_files,
-                current_file: virtual_path,
-            });
+            emit_skipped_progress(virtual_path, &stats, &on_progress);
             if entry_file_type.is_dir() {
                 walker.skip_current_dir();
             }
@@ -634,19 +625,32 @@ fn is_scan_cancelled_error(err: &anyhow::Error) -> bool {
         .any(|cause| cause.to_string() == "scan cancelled")
 }
 
-fn has_real_sibling_git_dir_for_git_tar_collision(path: &Path) -> bool {
-    if !path
-        .file_name()
-        .map(|name| name == ".git.tar")
-        .unwrap_or(false)
-    {
+fn archive_collision_source_relative(relative_path: &str) -> Option<String> {
+    relative_path
+        .strip_suffix(".tar")
+        .filter(|source_relative| !source_relative.is_empty() && !source_relative.ends_with('/'))
+        .map(|source_relative| source_relative.to_string())
+}
+
+fn has_sibling_archive_source_for_rule(
+    source_root: &Path,
+    relative_path: &str,
+    rules: &[CompiledScanRule],
+) -> bool {
+    let Some(source_relative) = archive_collision_source_relative(relative_path) else {
+        return false;
+    };
+
+    let sibling = source_root.join(&source_relative);
+    let Ok(metadata) = fs::symlink_metadata(&sibling) else {
+        return false;
+    };
+    if !metadata.is_dir() {
         return false;
     }
 
-    path.parent()
-        .map(|parent| parent.join(".git"))
-        .and_then(|git_dir| fs::symlink_metadata(git_dir).ok())
-        .map(|metadata| metadata.is_dir())
+    matching_rule(rules, &source_relative)
+        .map(|rule| rule.action == ScanRuleAction::Archive)
         .unwrap_or(false)
 }
 
@@ -813,6 +817,67 @@ mod tests {
     }
 
     #[test]
+    fn builtin_ignore_presets_skip_common_project_artifacts() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir_all(source_dir.path().join("target/debug")).unwrap();
+        fs::write(source_dir.path().join("target/debug/app"), b"rust").unwrap();
+        fs::create_dir_all(source_dir.path().join("app/node_modules/react")).unwrap();
+        fs::write(
+            source_dir.path().join("app/node_modules/react/index.js"),
+            b"node",
+        )
+        .unwrap();
+        fs::create_dir_all(source_dir.path().join("service/.venv/bin")).unwrap();
+        fs::write(
+            source_dir.path().join("service/.venv/bin/python"),
+            b"python",
+        )
+        .unwrap();
+        fs::create_dir_all(source_dir.path().join("other/venv/bin")).unwrap();
+        fs::write(source_dir.path().join("other/venv/bin/python"), b"python").unwrap();
+        fs::write(source_dir.path().join("keep.txt"), b"keep").unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![
+                    ScanRule::builtin(BuiltinScanPreset::RustTarget),
+                    ScanRule::builtin(BuiltinScanPreset::NodeModules),
+                    ScanRule::builtin(BuiltinScanPreset::PythonVenv),
+                ],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 1);
+        assert_eq!(stats.skipped_files, 4);
+        assert!(metadata_db.get_file("/repo/keep.txt").unwrap().is_some());
+        assert!(metadata_db
+            .get_file("/repo/target/debug/app")
+            .unwrap()
+            .is_none());
+        assert!(metadata_db
+            .get_file("/repo/app/node_modules/react/index.js")
+            .unwrap()
+            .is_none());
+        assert!(metadata_db
+            .get_file("/repo/service/.venv/bin/python")
+            .unwrap()
+            .is_none());
+        assert!(metadata_db
+            .get_file("/repo/other/venv/bin/python")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn archive_rule_stores_matching_directory_as_tar() {
         let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
 
@@ -860,6 +925,40 @@ mod tests {
             .collect();
 
         assert!(names.contains(&"cache/sub/item".to_string()));
+    }
+
+    #[test]
+    fn archive_rule_skips_real_file_colliding_with_archive_path() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir(source_dir.path().join("cache")).unwrap();
+        fs::write(source_dir.path().join("cache/item"), b"cached").unwrap();
+        fs::write(source_dir.path().join("cache.tar"), b"real cache tar").unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![ScanRule::new(r"(^|/)cache$", ScanRuleAction::Archive)],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 1);
+        assert_eq!(stats.skipped_files, 1);
+
+        let meta = metadata_db
+            .get_file("/repo/cache.tar")
+            .unwrap()
+            .expect("archive metadata should exist");
+        let cid = cid_util::cid_from_bytes(&meta.cid).unwrap();
+        let bytes = content_store.read(&cid).unwrap();
+        assert_ne!(bytes, b"real cache tar");
     }
 
     #[test]
@@ -969,6 +1068,71 @@ mod tests {
     }
 
     #[test]
+    fn archive_collision_does_not_treat_root_tar_as_archived_root() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::write(source_dir.path().join(".tar"), b"root tar").unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![ScanRule::new(r"^$", ScanRuleAction::Archive)],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 1);
+        assert_eq!(stats.skipped_files, 0);
+
+        let meta = metadata_db
+            .get_file("/repo/.tar")
+            .unwrap()
+            .expect("root .tar file should be stored");
+        let cid = cid_util::cid_from_bytes(&meta.cid).unwrap();
+        let bytes = content_store.read(&cid).unwrap();
+        assert_eq!(bytes, b"root tar");
+    }
+
+    #[test]
+    fn archive_collision_does_not_match_trailing_slash_synthetic_path() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir(source_dir.path().join("foo")).unwrap();
+        fs::write(source_dir.path().join("foo/.tar"), b"nested tar").unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![ScanRule::new(r"^foo/$", ScanRuleAction::Archive)],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 1);
+        assert_eq!(stats.skipped_files, 0);
+
+        let meta = metadata_db
+            .get_file("/repo/foo/.tar")
+            .unwrap()
+            .expect("nested .tar file should be stored");
+        let cid = cid_util::cid_from_bytes(&meta.cid).unwrap();
+        let bytes = content_store.read(&cid).unwrap();
+        assert_eq!(bytes, b"nested tar");
+    }
+
+    #[test]
     fn archive_rule_matching_regular_file_skips_it() {
         let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
 
@@ -1000,6 +1164,7 @@ mod tests {
 
         fs::create_dir_all(source_dir.path().join("cache/sub")).unwrap();
         fs::write(source_dir.path().join("cache/sub/item"), b"cached").unwrap();
+        fs::write(source_dir.path().join("cache.tar"), b"real cache tar").unwrap();
 
         let stats = scan_directory_into_with_options(
             source_dir.path(),
@@ -1018,9 +1183,20 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stats.total_files, 0);
+        assert_eq!(stats.total_files, 1);
         assert_eq!(stats.skipped_files, 1);
-        assert!(metadata_db.get_file("/repo/cache.tar").unwrap().is_none());
+        assert!(metadata_db
+            .get_file("/repo/cache/sub/item")
+            .unwrap()
+            .is_none());
+
+        let meta = metadata_db
+            .get_file("/repo/cache.tar")
+            .unwrap()
+            .expect("real cache.tar file should be stored");
+        let cid = cid_util::cid_from_bytes(&meta.cid).unwrap();
+        let bytes = content_store.read(&cid).unwrap();
+        assert_eq!(bytes, b"real cache tar");
     }
 
     #[test]
