@@ -166,8 +166,9 @@ pub async fn scan_directory(
     state: State<'_, AppState>,
     source: String,
     target_path: String,
-    bundle_git_dirs: bool,
+    bundle_git_dirs: Option<bool>,
 ) -> Result<ScanStats, String> {
+    let bundle_git_dirs = bundle_git_dirs.unwrap_or(false);
     state.scan_cancelled.store(false, Ordering::Relaxed);
 
     let store_path_buf = state.store_path.lock().map_err(|e| e.to_string())?.clone();
@@ -190,7 +191,10 @@ pub async fn scan_directory(
             .scan_into_with_options_and_cancellation(
                 &source_path,
                 &target_path,
-                ScanOptions { bundle_git_dirs },
+                ScanOptions {
+                    bundle_git_dirs,
+                    ..ScanOptions::default()
+                },
                 move |progress: &ScanProgress| {
                     let _ = app.emit("scan-progress", progress.clone());
                 },

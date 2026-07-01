@@ -99,7 +99,12 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_scan(source: &PathBuf, store_path: &PathBuf, target: &str, bundle_git_dirs: bool) -> Result<()> {
+fn cmd_scan(
+    source: &PathBuf,
+    store_path: &PathBuf,
+    target: &str,
+    bundle_git_dirs: bool,
+) -> Result<()> {
     println!("Scanning: {}", source.display());
     println!("Store:    {}", store_path.display());
     println!("Target:   {target}");
@@ -117,7 +122,10 @@ fn cmd_scan(source: &PathBuf, store_path: &PathBuf, target: &str, bundle_git_dir
         .scan_into_with_options(
             source,
             target,
-            ScanOptions { bundle_git_dirs },
+            ScanOptions {
+                bundle_git_dirs,
+                ..ScanOptions::default()
+            },
             |progress| {
                 files_count.store(progress.files_processed, Ordering::Relaxed);
                 if let Ok(mut lf) = last_file.lock() {
