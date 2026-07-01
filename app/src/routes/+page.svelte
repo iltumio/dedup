@@ -3,6 +3,7 @@
 	import FileDetails from '$lib/components/FileDetails.svelte';
 	import StatsPage from '$lib/components/StatsPage.svelte';
 	import AppShell from '$lib/components/AppShell.svelte';
+	import { UiButton, UiEmptyState } from '$lib/components/ui';
 	import WorkspaceManagerDialog from '$lib/components/workspace/WorkspaceManagerDialog.svelte';
 	import ScanDialog from '$lib/components/scan/ScanDialog.svelte';
 	import {
@@ -522,101 +523,30 @@
 		onImportStorePathChange={(value) => (importWsStorePath = value)}
 	/>
 
-	<main class="content">
-		{#if !hasWorkspace}
-			<div class="no-workspace">
-				<div class="no-ws-content">
-					<h2>Welcome to dedup</h2>
-					<p>Create a workspace to get started</p>
-					<button class="primary" onclick={openWorkspaceManager}>
-						Manage Workspaces
-					</button>
-				</div>
-			</div>
-		{:else if currentView === 'stats'}
+	{#if !hasWorkspace}
+		<UiEmptyState title="Welcome to dedup" message="Create or import a workspace to start scanning.">
+			{#snippet actions()}
+				<UiButton variant="primary" onclick={openWorkspaceManager}>Manage Workspaces</UiButton>
+			{/snippet}
+		</UiEmptyState>
+	{:else if currentView === 'stats'}
+		<div class="h-full overflow-auto p-3">
 			<StatsPage />
-		{:else}
-			<aside class="sidebar">
+		</div>
+	{:else}
+		<div class="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[20rem_minmax(0,1fr)]">
+			<aside class="min-h-0 border-r border-base-300 bg-base-100">
 				{#key treeRefreshKey}
 					<FileTree {selectedPath} onSelect={handleSelect} onScanInto={openScanDialog} />
 				{/key}
 			</aside>
-			<section class="details">
+			<section class="min-h-0 overflow-hidden bg-base-100">
 				{#if selectedPath && selectedEntry}
 					<FileDetails path={selectedPath} entry={selectedEntry} />
 				{:else}
-					<div class="placeholder">
-						<p>Select a file to view details</p>
-					</div>
+					<UiEmptyState title="Select a file" message="Choose a stored path to inspect metadata and duplicate locations." />
 				{/if}
 			</section>
-		{/if}
-	</main>
+		</div>
+	{/if}
 </AppShell>
-
-<style>
-	.content {
-		display: flex;
-		flex: 1;
-		overflow: hidden;
-	}
-
-	.sidebar {
-		width: 320px;
-		border-right: 1px solid var(--app-border-color);
-		overflow: hidden;
-	}
-
-	.details {
-		flex: 1;
-		overflow: hidden;
-	}
-
-	.placeholder {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		height: 100%;
-		color: var(--app-text-muted);
-		font-size: 14px;
-	}
-
-	/* No workspace landing */
-	.no-workspace {
-		flex: 1;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.no-ws-content {
-		text-align: center;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 12px;
-	}
-
-	.no-ws-content h2 {
-		font-size: 20px;
-		font-weight: 600;
-	}
-
-	.no-ws-content p {
-		color: var(--app-text-muted);
-		font-size: 14px;
-	}
-
-	.primary {
-		background: var(--app-accent);
-	}
-
-	.primary:hover {
-		background: var(--app-accent-light);
-	}
-
-	.primary:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-</style>
