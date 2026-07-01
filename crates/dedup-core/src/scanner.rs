@@ -833,6 +833,14 @@ mod tests {
             .unwrap()
             .expect("expected two/.git.tar metadata");
         assert_eq!(one_git_tar_meta.cid, two_git_tar_meta.cid);
+        assert!(metadata_db
+            .get_file("/repo/one/.git/HEAD")
+            .unwrap()
+            .is_none());
+        assert!(metadata_db
+            .get_file("/repo/two/.git/HEAD")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -988,6 +996,7 @@ mod tests {
         }
 
         use std::sync::atomic::{AtomicUsize, Ordering};
+        const CANCEL_AFTER_CHECKS: usize = 6;
         let cancel_checks = AtomicUsize::new(0);
         let result = scan_directory_into_with_options_and_cancellation(
             source_dir.path(),
@@ -999,11 +1008,12 @@ mod tests {
                 bundle_git_dirs: true,
             },
             |_| {},
-            || cancel_checks.fetch_add(1, Ordering::SeqCst) >= 2,
+            || cancel_checks.fetch_add(1, Ordering::SeqCst) >= CANCEL_AFTER_CHECKS,
         );
 
-        assert!(result.unwrap_err().to_string().contains("scan cancelled"));
-        assert!(cancel_checks.load(Ordering::SeqCst) >= 3);
+        let err = result.unwrap_err();
+        assert!(is_scan_cancelled_error(&err));
+        assert!(cancel_checks.load(Ordering::SeqCst) > CANCEL_AFTER_CHECKS);
         assert!(metadata_db.get_file("/repo/.git.tar").unwrap().is_none());
         assert!(!store_dir.path().join("errors_repo.log").exists());
     }
