@@ -797,6 +797,45 @@ mod tests {
     }
 
     #[test]
+    fn bundled_identical_git_dirs_are_counted_as_duplicates() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        for repo in ["one", "two"] {
+            let git_dir = source_dir.path().join(repo).join(".git");
+            fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+            fs::write(git_dir.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+            fs::write(git_dir.join("refs/heads/main"), b"abc123\n").unwrap();
+        }
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                bundle_git_dirs: true,
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 2);
+        assert_eq!(stats.unique_blobs, 1);
+        assert_eq!(stats.duplicate_files, 1);
+
+        let one_git_tar_meta = metadata_db
+            .get_file("/repo/one/.git.tar")
+            .unwrap()
+            .expect("expected one/.git.tar metadata");
+        let two_git_tar_meta = metadata_db
+            .get_file("/repo/two/.git.tar")
+            .unwrap()
+            .expect("expected two/.git.tar metadata");
+        assert_eq!(one_git_tar_meta.cid, two_git_tar_meta.cid);
+    }
+
+    #[test]
     fn bundle_git_dirs_skips_real_file_colliding_with_git_tar_path() {
         let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
 
@@ -930,6 +969,43 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(is_scan_cancelled_error(&err));
+    }
+
+    #[test]
+    fn bundled_git_scan_honors_cancellation() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        let git_dir = source_dir.path().join(".git");
+        let objects_dir = git_dir.join("objects/aa");
+        fs::create_dir_all(&objects_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        for index in 0..16 {
+            fs::write(
+                objects_dir.join(format!("{index:02x}")),
+                format!("object {index}\n"),
+            )
+            .unwrap();
+        }
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cancel_checks = AtomicUsize::new(0);
+        let result = scan_directory_into_with_options_and_cancellation(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                bundle_git_dirs: true,
+            },
+            |_| {},
+            || cancel_checks.fetch_add(1, Ordering::SeqCst) >= 2,
+        );
+
+        assert!(result.unwrap_err().to_string().contains("scan cancelled"));
+        assert!(cancel_checks.load(Ordering::SeqCst) >= 3);
+        assert!(metadata_db.get_file("/repo/.git.tar").unwrap().is_none());
+        assert!(!store_dir.path().join("errors_repo.log").exists());
     }
 
     #[test]
