@@ -9,6 +9,7 @@ blake3 = "1.8"
 cid = "0.11"
 multihash-codetable = { version = "0.1", features = ["blake3"] }
 redb = "2.6"
+regex = "1"
 lz4_flex = "0.11"
 walkdir = "2.5"
 tar = "0.4"

@@ -663,6 +663,7 @@ fn extract_ctime(meta: &fs::Metadata) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{BuiltinScanPreset, ScanRule, ScanRuleAction};
     use tempfile::TempDir;
 
     fn setup_test_store() -> (TempDir, TempDir, ContentStore, MetadataDb) {
@@ -757,6 +758,7 @@ mod tests {
             &metadata_db,
             ScanOptions {
                 bundle_git_dirs: true,
+                rules: Vec::new(),
             },
             |_| {},
         )
@@ -815,6 +817,7 @@ mod tests {
             &metadata_db,
             ScanOptions {
                 bundle_git_dirs: true,
+                rules: Vec::new(),
             },
             |_| {},
         )
@@ -863,6 +866,7 @@ mod tests {
             &metadata_db,
             ScanOptions {
                 bundle_git_dirs: true,
+                rules: Vec::new(),
             },
             |_| {},
         )
@@ -913,6 +917,7 @@ mod tests {
             &metadata_db,
             ScanOptions {
                 bundle_git_dirs: true,
+                rules: Vec::new(),
             },
             |_| {},
         )
@@ -942,6 +947,7 @@ mod tests {
             &metadata_db,
             ScanOptions {
                 bundle_git_dirs: true,
+                rules: Vec::new(),
             },
             |_| {},
         )
@@ -1006,6 +1012,7 @@ mod tests {
             &metadata_db,
             ScanOptions {
                 bundle_git_dirs: true,
+                rules: Vec::new(),
             },
             |_| {},
             || cancel_checks.fetch_add(1, Ordering::SeqCst) >= CANCEL_AFTER_CHECKS,
@@ -1210,5 +1217,31 @@ mod tests {
         let entries = metadata_db.list_dir("/").unwrap();
         let files: Vec<_> = entries.iter().filter(|entry| !entry.is_dir).collect();
         assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn builtin_scan_presets_expand_to_rules() {
+        let git = ScanRule::builtin(BuiltinScanPreset::Git);
+        assert_eq!(git.pattern, r"(^|/)\.git$");
+        assert_eq!(git.action, ScanRuleAction::Archive);
+
+        let rust = ScanRule::builtin(BuiltinScanPreset::RustTarget);
+        assert_eq!(rust.pattern, r"(^|/)target$");
+        assert_eq!(rust.action, ScanRuleAction::Ignore);
+
+        let node = ScanRule::builtin(BuiltinScanPreset::NodeModules);
+        assert_eq!(node.pattern, r"(^|/)node_modules$");
+        assert_eq!(node.action, ScanRuleAction::Ignore);
+
+        let python = ScanRule::builtin(BuiltinScanPreset::PythonVenv);
+        assert_eq!(python.pattern, r"(^|/)(\.venv|venv)$");
+        assert_eq!(python.action, ScanRuleAction::Ignore);
+    }
+
+    #[test]
+    fn scan_options_default_has_no_rules() {
+        let options = ScanOptions::default();
+        assert!(!options.bundle_git_dirs);
+        assert!(options.rules.is_empty());
     }
 }
