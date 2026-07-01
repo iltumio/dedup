@@ -3,6 +3,7 @@
 	import FileDetails from '$lib/components/FileDetails.svelte';
 	import StatsPage from '$lib/components/StatsPage.svelte';
 	import AppShell from '$lib/components/AppShell.svelte';
+	import WorkspaceManagerDialog from '$lib/components/workspace/WorkspaceManagerDialog.svelte';
 	import {
 		scanDirectory,
 		cancelScan,
@@ -20,7 +21,6 @@
 		type DirEntry,
 		type ScanStats,
 		type ScanProgress,
-		type Workspace,
 		type WorkspacesConfig,
 		type CustomScanRule,
 		type ScanRule
@@ -59,12 +59,11 @@
 		custom_scan_rules: []
 	});
 	let showWorkspaceDialog = $state(false);
-	let showCreateWorkspace = $state(false);
+	let workspaceDialogMode = $state<'list' | 'create' | 'import'>('list');
 	let newWsLabel = $state('');
 	let newWsTags = $state('');
 	let newWsStorePath = $state('');
 	let wsError = $state<string | null>(null);
-	let showImportWorkspace = $state(false);
 	let importWsStorePath = $state('');
 	let importWsLabel = $state('');
 	let importingWs = $state(false);
@@ -136,8 +135,7 @@
 	// ── Workspace actions ──
 	function openWorkspaceManager() {
 		wsError = null;
-		showCreateWorkspace = false;
-		showImportWorkspace = false;
+		workspaceDialogMode = 'list';
 		showWorkspaceDialog = true;
 	}
 
@@ -146,7 +144,7 @@
 		newWsTags = '';
 		newWsStorePath = '';
 		wsError = null;
-		showCreateWorkspace = true;
+		workspaceDialogMode = 'create';
 	}
 
 	async function handleCreateWorkspace() {
@@ -159,7 +157,7 @@
 				.filter(Boolean);
 			await createWorkspace(newWsLabel, tags, newWsStorePath);
 			workspacesConfig = await listWorkspaces();
-			showCreateWorkspace = false;
+			workspaceDialogMode = 'list';
 		} catch (e) {
 			wsError = String(e);
 		}
@@ -236,7 +234,7 @@
 		importWsStorePath = '';
 		importWsLabel = '';
 		wsError = null;
-		showImportWorkspace = true;
+		workspaceDialogMode = 'import';
 	}
 
 	async function handleImportWorkspace() {
@@ -246,13 +244,27 @@
 		try {
 			await importWorkspace(importWsStorePath, importWsLabel);
 			workspacesConfig = await listWorkspaces();
-			showImportWorkspace = false;
+			workspaceDialogMode = 'list';
 			treeRefreshKey++;
 		} catch (e) {
 			wsError = String(e);
 		} finally {
 			importingWs = false;
 		}
+	}
+
+	function handleWorkspaceModeChange(mode: 'list' | 'create' | 'import') {
+		if (mode === 'create') {
+			openCreateWorkspace();
+			return;
+		}
+
+		if (mode === 'import') {
+			openImportWorkspace();
+			return;
+		}
+
+		workspaceDialogMode = 'list';
 	}
 
 	// ── File browser actions ──
@@ -608,144 +620,31 @@
 		</div>
 	{/if}
 
-	<!-- Workspace Manager Dialog -->
-	{#if showWorkspaceDialog}
-		<div class="dialog-overlay" role="dialog">
-			<div class="dialog-content dialog-wide">
-				{#if showCreateWorkspace}
-					<h2>New Workspace</h2>
-					<label>
-						<span>Label</span>
-						<input type="text" bind:value={newWsLabel} placeholder="My Photos" />
-					</label>
-					<label>
-						<span>Tags (comma-separated)</span>
-						<input type="text" bind:value={newWsTags} placeholder="photos, backup" />
-					</label>
-					<label>
-						<span>Store path</span>
-						<input
-							type="text"
-							bind:value={newWsStorePath}
-							placeholder="/path/to/workspace/.store"
-						/>
-						<span class="hint">Directory where blobs and metadata will be stored</span>
-					</label>
-
-					{#if wsError}
-						<div class="error">{wsError}</div>
-					{/if}
-
-					<div class="dialog-actions">
-						<button class="cancel" onclick={() => (showCreateWorkspace = false)}>
-							Back
-						</button>
-						<button class="primary" onclick={handleCreateWorkspace}>
-							Create
-						</button>
-					</div>
-				{:else if showImportWorkspace}
-					<h2>Import Existing Store</h2>
-					<label>
-						<span>Label</span>
-						<input type="text" bind:value={importWsLabel} placeholder="My Imported Store" disabled={importingWs} />
-					</label>
-					<label>
-						<span>Store path</span>
-						<input
-							type="text"
-							bind:value={importWsStorePath}
-							placeholder="/path/to/.store or /path/to/.store/metadata.redb"
-							disabled={importingWs}
-						/>
-						<span class="hint">Path to an existing .store directory or its metadata.redb file</span>
-					</label>
-
-					{#if wsError}
-						<div class="error">{wsError}</div>
-					{/if}
-
-					<div class="dialog-actions">
-						<button class="cancel" onclick={() => (showImportWorkspace = false)} disabled={importingWs}>
-							Back
-						</button>
-						<button class="primary" onclick={handleImportWorkspace} disabled={importingWs}>
-							{importingWs ? 'Importing...' : 'Import'}
-						</button>
-					</div>
-				{:else}
-					<h2>Workspaces</h2>
-
-					{#if workspacesConfig.workspaces.length === 0}
-						<div class="ws-empty">
-							<p>No workspaces yet. Create one to get started.</p>
-						</div>
-					{:else}
-						<ul class="ws-list">
-							{#each workspacesConfig.workspaces as ws (ws.id)}
-								<li
-									class="ws-item"
-									class:active={ws.id === workspacesConfig.active_workspace_id}
-								>
-									<button
-										class="ws-item-main"
-										onclick={() => handleSwitchWorkspace(ws.id)}
-									>
-										<span class="ws-item-label">{ws.label}</span>
-										<span class="ws-item-path">{ws.store_path}</span>
-										{#if ws.tags.length > 0}
-											<div class="ws-item-tags">
-												{#each ws.tags as tag}
-													<span class="ws-tag">{tag}</span>
-												{/each}
-											</div>
-										{/if}
-										{#if ws.stats.total_files > 0}
-											<div class="ws-item-stats">
-												<span>{ws.stats.total_files} files</span>
-												<span class="sep">·</span>
-												<span class="highlight">{ws.stats.duplicate_files} dups</span>
-												<span class="sep">·</span>
-												<span class="saved">saved {formatSize(ws.stats.total_original_bytes - ws.stats.total_stored_bytes)}</span>
-												<span class="sep">·</span>
-												<span>{ws.stats.scans_count} scans</span>
-											</div>
-										{/if}
-									</button>
-									<button
-										class="ws-delete-btn"
-										onclick={() => handleDeleteWorkspace(ws.id)}
-										title="Delete workspace"
-									>
-										×
-									</button>
-								</li>
-							{/each}
-						</ul>
-					{/if}
-
-					{#if wsError}
-						<div class="error">{wsError}</div>
-					{/if}
-
-					<div class="dialog-actions">
-						<button class="secondary" onclick={handleExportWorkspaces}>Export</button>
-						<button class="secondary" onclick={handleImportWorkspaces}>Import Config</button>
-						<div class="spacer"></div>
-						<button class="cancel" onclick={() => (showWorkspaceDialog = false)}>
-							Close
-						</button>
-						<button class="primary" onclick={openImportWorkspace}>
-							Import Existing
-						</button>
-						<button class="primary" onclick={openCreateWorkspace}>
-							New Workspace
-						</button>
-					</div>
-				{/if}
-			</div>
-		</div>
-	{/if}
+	<WorkspaceManagerDialog
+		open={showWorkspaceDialog}
+		config={workspacesConfig}
+		mode={workspaceDialogMode}
+		error={wsError}
+		importing={importingWs}
+		newLabel={newWsLabel}
+		newTags={newWsTags}
+		newStorePath={newWsStorePath}
+		importLabel={importWsLabel}
+		importStorePath={importWsStorePath}
+		onClose={() => (showWorkspaceDialog = false)}
+		onModeChange={handleWorkspaceModeChange}
+		onSwitch={handleSwitchWorkspace}
+		onDelete={handleDeleteWorkspace}
+		onExport={handleExportWorkspaces}
+		onImportConfig={handleImportWorkspaces}
+		onCreate={handleCreateWorkspace}
+		onImportStore={handleImportWorkspace}
+		onNewLabelChange={(value) => (newWsLabel = value)}
+		onNewTagsChange={(value) => (newWsTags = value)}
+		onNewStorePathChange={(value) => (newWsStorePath = value)}
+		onImportLabelChange={(value) => (importWsLabel = value)}
+		onImportStorePathChange={(value) => (importWsStorePath = value)}
+	/>
 
 	<main class="content">
 		{#if !hasWorkspace}
@@ -780,20 +679,6 @@
 </AppShell>
 
 <style>
-	.ws-tag {
-		display: inline-block;
-		padding: 1px 6px;
-		background: var(--app-accent);
-		border-radius: 3px;
-		font-size: 10px;
-		font-weight: 500;
-		opacity: 0.8;
-	}
-
-	.sep {
-		opacity: 0.4;
-	}
-
 	.content {
 		display: flex;
 		flex: 1;
@@ -868,12 +753,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: 14px;
-	}
-
-	.dialog-wide {
-		width: 540px;
-		max-height: 70vh;
-		overflow-y: auto;
 	}
 
 	.dialog-content h2 {
@@ -1081,10 +960,6 @@
 		gap: 8px;
 	}
 
-	.spacer {
-		flex: 1;
-	}
-
 	.dialog-actions button {
 		padding: 8px 16px;
 		border-radius: 6px;
@@ -1124,111 +999,5 @@
 	.error {
 		color: var(--app-duplicate);
 		font-size: 13px;
-	}
-
-	/* Workspace list */
-	.ws-empty {
-		text-align: center;
-		padding: 24px;
-		color: var(--app-text-muted);
-		font-size: 13px;
-	}
-
-	.ws-list {
-		list-style: none;
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-	}
-
-	.ws-item {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		border: 1px solid var(--app-border-color);
-		border-radius: 8px;
-		overflow: hidden;
-		transition: border-color 0.15s;
-	}
-
-	.ws-item:hover {
-		border-color: var(--app-accent);
-	}
-
-	.ws-item.active {
-		border-color: var(--app-accent-light);
-		background: rgba(69, 160, 165, 0.08);
-	}
-
-	.ws-item-main {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		padding: 10px 14px;
-		text-align: left;
-		background: none;
-		border: none;
-		cursor: pointer;
-	}
-
-	.ws-item-label {
-		font-size: 14px;
-		font-weight: 500;
-	}
-
-	.ws-item-path {
-		font-size: 11px;
-		font-family: var(--app-font-mono);
-		color: var(--app-text-muted);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.ws-item-tags {
-		display: flex;
-		gap: 4px;
-		flex-wrap: wrap;
-	}
-
-	.ws-item-stats {
-		display: flex;
-		gap: 6px;
-		font-size: 11px;
-		color: var(--app-text-muted);
-		font-family: var(--app-font-mono);
-		margin-top: 2px;
-	}
-
-	.ws-item-stats .highlight {
-		color: var(--app-duplicate);
-		font-weight: 600;
-	}
-
-	.ws-item-stats .saved {
-		color: var(--app-success);
-		font-weight: 600;
-	}
-
-	.ws-delete-btn {
-		flex-shrink: 0;
-		width: 32px;
-		height: 32px;
-		border-radius: 4px;
-		background: none;
-		border: none;
-		font-size: 18px;
-		color: var(--app-text-muted);
-		cursor: pointer;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		margin-right: 8px;
-	}
-
-	.ws-delete-btn:hover {
-		background: rgba(239, 83, 80, 0.15);
-		color: var(--app-duplicate);
 	}
 </style>
