@@ -5,12 +5,16 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{bail, Context, Result};
+use regex::Regex;
 use walkdir::WalkDir;
 
 use crate::cid as cid_util;
 use crate::content_store::ContentStore;
 use crate::metadata::MetadataDb;
-use crate::types::{DirMetadata, FileMetadata, ScanOptions, ScanProgress, ScanStats};
+use crate::types::{
+    BuiltinScanPreset, DirMetadata, FileMetadata, ScanOptions, ScanProgress, ScanRule,
+    ScanRuleAction, ScanStats,
+};
 
 /// Scan a source directory and replicate it into a content-addressed store.
 ///
@@ -112,6 +116,56 @@ where
     )
 }
 
+#[derive(Debug)]
+struct CompiledScanRule {
+    regex: Regex,
+    action: ScanRuleAction,
+}
+
+fn compile_scan_rules(options: &ScanOptions) -> Result<Vec<CompiledScanRule>> {
+    let mut rules: Vec<ScanRule> = Vec::new();
+
+    if options.bundle_git_dirs {
+        rules.push(ScanRule::builtin(BuiltinScanPreset::Git));
+    }
+
+    rules.extend(options.rules.clone());
+
+    rules
+        .into_iter()
+        .map(|rule| {
+            let regex = Regex::new(&rule.pattern)
+                .with_context(|| format!("invalid scan rule regex: {}", rule.pattern))?;
+            Ok(CompiledScanRule {
+                regex,
+                action: rule.action,
+            })
+        })
+        .collect()
+}
+
+fn matching_rule<'a>(
+    rules: &'a [CompiledScanRule],
+    relative_path: &str,
+) -> Option<&'a CompiledScanRule> {
+    rules.iter().find(|rule| rule.regex.is_match(relative_path))
+}
+
+fn emit_skipped_progress<F>(virtual_path: String, stats: &ScanStats, on_progress: &F)
+where
+    F: Fn(&ScanProgress),
+{
+    on_progress(&ScanProgress {
+        files_processed: stats.total_files,
+        dirs_processed: stats.total_dirs,
+        bytes_processed: stats.total_original_bytes,
+        bytes_stored: stats.total_stored_bytes,
+        duplicates_found: stats.duplicate_files,
+        skipped_files: stats.skipped_files,
+        current_file: virtual_path,
+    });
+}
+
 pub fn scan_directory_into_with_options_and_cancellation<F, C>(
     source: &Path,
     target_prefix: &str,
@@ -129,6 +183,8 @@ where
     let source = source
         .canonicalize()
         .with_context(|| format!("source directory not found: {}", source.display()))?;
+
+    let compiled_rules = compile_scan_rules(&options)?;
 
     // Normalize target prefix: ensure it starts with / and has no trailing /
     let prefix = if target_prefix == "/" || target_prefix.is_empty() {
@@ -244,6 +300,26 @@ where
         } else {
             format!("{prefix}/{rel_str}")
         };
+
+        if let Some(rule) = matching_rule(&compiled_rules, &rel_str) {
+            match rule.action {
+                ScanRuleAction::Ignore => {
+                    stats.skipped_files += 1;
+                    emit_skipped_progress(virtual_path, &stats, &on_progress);
+                    if entry_file_type.is_dir() {
+                        walker.skip_current_dir();
+                    }
+                    continue;
+                }
+                ScanRuleAction::Archive => {
+                    if !entry_file_type.is_dir() {
+                        stats.skipped_files += 1;
+                        emit_skipped_progress(virtual_path, &stats, &on_progress);
+                        continue;
+                    }
+                }
+            }
+        }
 
         if options.bundle_git_dirs
             && (reserved_git_archive_paths.contains(&virtual_path)
@@ -675,6 +751,61 @@ mod tests {
         let metadata_db = MetadataDb::open(&db_path).unwrap();
 
         (source_dir, store_dir, content_store, metadata_db)
+    }
+
+    #[test]
+    fn ignore_rule_skips_matching_directory_and_children() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir_all(source_dir.path().join("target/debug")).unwrap();
+        fs::write(source_dir.path().join("target/debug/app"), b"binary").unwrap();
+        fs::write(source_dir.path().join("src.rs"), b"source").unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![ScanRule::new(r"(^|/)target$", ScanRuleAction::Ignore)],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 1);
+        assert_eq!(stats.skipped_files, 1);
+        assert!(metadata_db.get_file("/repo/src.rs").unwrap().is_some());
+        assert!(metadata_db
+            .get_file("/repo/target/debug/app")
+            .unwrap()
+            .is_none());
+        assert!(metadata_db.list_dir("/repo/target").unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_scan_rule_regex_fails_before_storing_metadata() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+        fs::write(source_dir.path().join("file.txt"), b"content").unwrap();
+
+        let err = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![ScanRule::new("[", ScanRuleAction::Ignore)],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid scan rule regex"));
+        assert!(metadata_db.get_file("/repo/file.txt").unwrap().is_none());
     }
 
     #[test]
