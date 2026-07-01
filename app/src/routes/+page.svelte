@@ -8,6 +8,8 @@
 		onScanProgress,
 		formatSize,
 		listWorkspaces,
+		listCustomScanRules,
+		saveCustomScanRules,
 		createWorkspace,
 		switchWorkspace,
 		deleteWorkspace,
@@ -18,7 +20,9 @@
 		type ScanStats,
 		type ScanProgress,
 		type Workspace,
-		type WorkspacesConfig
+		type WorkspacesConfig,
+		type CustomScanRule,
+		type ScanRule
 	} from '$lib/api/tauri';
 	import type { UnlistenFn } from '@tauri-apps/api/event';
 
@@ -28,6 +32,16 @@
 	let scanSource = $state('');
 	let targetPath = $state('/');
 	let bundleGitDirs = $state(false);
+	let ignoreRustTarget = $state(false);
+	let ignoreNodeModules = $state(false);
+	let ignorePythonVenv = $state(false);
+	let customScanRules = $state<CustomScanRule[]>([]);
+	let activeCustomRuleIds = $state<string[]>([]);
+	let customRulesError = $state<string | null>(null);
+	let savingCustomRules = $state(false);
+	let newRuleLabel = $state('');
+	let newRulePattern = $state('');
+	let newRuleAction = $state<'ignore' | 'archive'>('ignore');
 	let scanning = $state(false);
 	let cancelling = $state(false);
 	let scanResult = $state<ScanStats | null>(null);
@@ -70,6 +84,7 @@
 	// Load workspaces on mount
 	$effect(() => {
 		loadWorkspaces();
+		loadCustomScanRules();
 	});
 
 	async function loadWorkspaces() {
@@ -79,6 +94,33 @@
 		} catch (e) {
 			console.error('Failed to load workspaces:', e);
 		}
+	}
+
+	async function loadCustomScanRules() {
+		try {
+			customScanRules = await listCustomScanRules();
+			activeCustomRuleIds = customScanRules.filter((rule) => rule.enabled).map((rule) => rule.id);
+			customRulesError = null;
+		} catch (e) {
+			customRulesError = String(e);
+		}
+	}
+
+	function syncCustomScanRulesFromConfig(nextRules: CustomScanRule[]) {
+		const previousRuleIds = new Set(customScanRules.map((rule) => rule.id));
+		const nextRuleIds = new Set(nextRules.map((rule) => rule.id));
+		customScanRules = nextRules;
+
+		if (!showScanDialog) {
+			activeCustomRuleIds = customScanRules.filter((rule) => rule.enabled).map((rule) => rule.id);
+			return;
+		}
+
+		const preservedActiveIds = activeCustomRuleIds.filter((id) => nextRuleIds.has(id));
+		const newlyEnabledIds = customScanRules
+			.filter((rule) => rule.enabled && !previousRuleIds.has(rule.id))
+			.map((rule) => rule.id);
+		activeCustomRuleIds = Array.from(new Set([...preservedActiveIds, ...newlyEnabledIds]));
 	}
 
 	// ── Workspace actions ──
@@ -166,6 +208,7 @@
 				if (!file) return;
 				const json = await file.text();
 				workspacesConfig = await importWorkspaces(json);
+				syncCustomScanRulesFromConfig(workspacesConfig.custom_scan_rules);
 				treeRefreshKey++;
 			};
 			input.click();
@@ -206,13 +249,108 @@
 	function openScanDialog(presetTarget?: string) {
 		targetPath = presetTarget ?? '/';
 		bundleGitDirs = false;
+		ignoreRustTarget = false;
+		ignoreNodeModules = false;
+		ignorePythonVenv = false;
+		activeCustomRuleIds = customScanRules.filter((rule) => rule.enabled).map((rule) => rule.id);
 		scanError = null;
+		customRulesError = null;
 		progress = null;
 		showScanDialog = true;
 	}
 
+	function buildScanRules(): ScanRule[] {
+		const rules: ScanRule[] = [];
+		if (bundleGitDirs) {
+			rules.push({ pattern: '(^|/)\\.git$', action: 'archive' });
+		}
+		if (ignoreRustTarget) {
+			rules.push({ pattern: '(^|/)target$', action: 'ignore' });
+		}
+		if (ignoreNodeModules) {
+			rules.push({ pattern: '(^|/)node_modules$', action: 'ignore' });
+		}
+		if (ignorePythonVenv) {
+			rules.push({ pattern: '(^|/)(\\.venv|venv)$', action: 'ignore' });
+		}
+		const activeCustomRules = new Set(activeCustomRuleIds);
+		for (const rule of customScanRules) {
+			if (activeCustomRules.has(rule.id)) {
+				rules.push({ pattern: rule.pattern, action: rule.action });
+			}
+		}
+		return rules;
+	}
+
+	function toggleCustomRule(ruleId: string, checked: boolean) {
+		if (savingCustomRules) return;
+		if (checked) {
+			activeCustomRuleIds = Array.from(new Set([...activeCustomRuleIds, ruleId]));
+		} else {
+			activeCustomRuleIds = activeCustomRuleIds.filter((id) => id !== ruleId);
+		}
+	}
+
+	async function handleAddCustomRule() {
+		if (savingCustomRules || !newRuleLabel.trim() || !newRulePattern.trim()) return;
+		customRulesError = null;
+		const newRuleId = `rule_${Date.now().toString(16)}`;
+		const previousRules = customScanRules;
+		const previousActiveRuleIds = activeCustomRuleIds;
+		const activeBeforeSave = new Set(activeCustomRuleIds);
+		const nextRules = [
+			...customScanRules,
+			{
+				id: newRuleId,
+				label: newRuleLabel.trim(),
+				pattern: newRulePattern.trim(),
+				action: newRuleAction,
+				enabled: true
+			}
+		];
+		savingCustomRules = true;
+		try {
+			customScanRules = await saveCustomScanRules(nextRules);
+			const savedRuleIds = new Set(customScanRules.map((rule) => rule.id));
+			activeCustomRuleIds = Array.from(new Set([...activeBeforeSave, newRuleId])).filter((id) =>
+				savedRuleIds.has(id)
+			);
+			newRuleLabel = '';
+			newRulePattern = '';
+			newRuleAction = 'ignore';
+		} catch (e) {
+			customScanRules = previousRules;
+			activeCustomRuleIds = previousActiveRuleIds;
+			customRulesError = String(e);
+		} finally {
+			savingCustomRules = false;
+		}
+	}
+
+	async function handleRemoveCustomRule(ruleId: string) {
+		if (savingCustomRules) return;
+		customRulesError = null;
+		const previousRules = customScanRules;
+		const previousActiveRuleIds = activeCustomRuleIds;
+		const nextRules = customScanRules.filter((rule) => rule.id !== ruleId);
+		customScanRules = nextRules;
+		activeCustomRuleIds = activeCustomRuleIds.filter((id) => id !== ruleId);
+		savingCustomRules = true;
+		try {
+			customScanRules = await saveCustomScanRules(nextRules);
+			const savedRuleIds = new Set(customScanRules.map((rule) => rule.id));
+			activeCustomRuleIds = activeCustomRuleIds.filter((id) => savedRuleIds.has(id));
+		} catch (e) {
+			customScanRules = previousRules;
+			activeCustomRuleIds = previousActiveRuleIds;
+			customRulesError = String(e);
+		} finally {
+			savingCustomRules = false;
+		}
+	}
+
 	async function handleScan() {
-		if (!scanSource.trim()) return;
+		if (!scanSource.trim() || savingCustomRules) return;
 		scanning = true;
 		cancelling = false;
 		scanError = null;
@@ -225,7 +363,7 @@
 				progress = p;
 			});
 
-			scanResult = await scanDirectory(scanSource, targetPath, bundleGitDirs);
+			scanResult = await scanDirectory(scanSource, targetPath, false, buildScanRules());
 			showScanDialog = false;
 			treeRefreshKey++;
 			// Refresh workspace stats
@@ -312,9 +450,9 @@
 
 	<!-- Scan Dialog -->
 	{#if showScanDialog}
-		<div class="dialog-overlay" role="dialog">
+		<div class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="scan-dialog-title">
 			<div class="dialog-content">
-				<h2>Scan Directory</h2>
+				<h2 id="scan-dialog-title">Scan Directory</h2>
 				<label>
 					<span>Source directory</span>
 					<input
@@ -334,10 +472,86 @@
 					/>
 					<span class="hint">Use "/" for root, or e.g. "/photos/vacation" to nest</span>
 				</label>
-				<label class="checkbox-row">
-					<input type="checkbox" bind:checked={bundleGitDirs} disabled={scanning} />
-					<span>Bundle .git directories</span>
-				</label>
+				<div class="scan-rules">
+					<label class="checkbox-row">
+						<input type="checkbox" bind:checked={bundleGitDirs} disabled={scanning} />
+						<span>Archive .git directories</span>
+					</label>
+					<label class="checkbox-row">
+						<input type="checkbox" bind:checked={ignoreRustTarget} disabled={scanning} />
+						<span>Ignore Rust target directories</span>
+					</label>
+					<label class="checkbox-row">
+						<input type="checkbox" bind:checked={ignoreNodeModules} disabled={scanning} />
+						<span>Ignore node_modules directories</span>
+					</label>
+					<label class="checkbox-row">
+						<input type="checkbox" bind:checked={ignorePythonVenv} disabled={scanning} />
+						<span>Ignore Python virtual environments</span>
+					</label>
+				</div>
+
+				{#if customScanRules.length > 0}
+					<div class="scan-rules">
+						{#each customScanRules as rule (rule.id)}
+							<div class="custom-rule-row">
+								<label class="checkbox-row custom-rule-label">
+									<input
+										type="checkbox"
+										checked={activeCustomRuleIds.includes(rule.id)}
+										onchange={(event) =>
+											toggleCustomRule(rule.id, event.currentTarget.checked)}
+										disabled={scanning || savingCustomRules}
+									/>
+									<span>{rule.label}</span>
+								</label>
+								<button
+									class="rule-remove"
+									onclick={() => handleRemoveCustomRule(rule.id)}
+									disabled={scanning || savingCustomRules}
+								>
+									Remove
+								</button>
+							</div>
+						{/each}
+					</div>
+				{/if}
+
+				<div class="custom-rule-editor">
+					<input
+						type="text"
+						bind:value={newRuleLabel}
+						aria-label="Custom rule label"
+						placeholder="Rule label"
+						disabled={scanning || savingCustomRules}
+					/>
+					<input
+						type="text"
+						bind:value={newRulePattern}
+						aria-label="Custom rule regex"
+						placeholder="Regex, e.g. (^|/)dist$"
+						disabled={scanning || savingCustomRules}
+					/>
+					<select
+						bind:value={newRuleAction}
+						aria-label="Custom rule action"
+						disabled={scanning || savingCustomRules}
+					>
+						<option value="ignore">Ignore</option>
+						<option value="archive">Archive</option>
+					</select>
+					<button
+						class="secondary"
+						onclick={handleAddCustomRule}
+						disabled={scanning || savingCustomRules}
+					>
+						Add Rule
+					</button>
+				</div>
+
+				{#if customRulesError}
+					<div class="error">{customRulesError}</div>
+				{/if}
 
 				{#if scanning && progress}
 					<div class="progress-section">
@@ -391,7 +605,7 @@
 					<button class="cancel" onclick={handleCancelScan} disabled={cancelling}>
 						{scanning ? (cancelling ? 'Cancelling...' : 'Cancel Scan') : 'Cancel'}
 					</button>
-					<button class="primary" onclick={handleScan} disabled={scanning}>
+					<button class="primary" onclick={handleScan} disabled={scanning || savingCustomRules}>
 						{scanning ? 'Scanning...' : 'Start Scan'}
 					</button>
 				</div>
@@ -771,7 +985,9 @@
 		border: 1px solid var(--border);
 		border-radius: 12px;
 		padding: 24px;
-		width: 480px;
+		width: min(480px, calc(100vw - 32px));
+		max-height: calc(100vh - 32px);
+		overflow-y: auto;
 		display: flex;
 		flex-direction: column;
 		gap: 14px;
@@ -833,6 +1049,78 @@
 		height: 14px;
 		padding: 0;
 		margin: 0;
+	}
+
+	.checkbox-row span {
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+
+	.scan-rules {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 8px 0;
+	}
+
+	.custom-rule-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.custom-rule-label {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.rule-remove {
+		margin-left: auto;
+		padding: 4px 8px;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		color: var(--text-muted);
+		font-size: 12px;
+		flex-shrink: 0;
+	}
+
+	.rule-remove:hover:not(:disabled) {
+		border-color: var(--duplicate);
+		color: var(--duplicate);
+	}
+
+	.custom-rule-editor {
+		display: grid;
+		grid-template-columns: 1fr 1fr 96px auto;
+		gap: 8px;
+		align-items: center;
+	}
+
+	.custom-rule-editor input {
+		min-width: 0;
+	}
+
+	.custom-rule-editor select {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 8px 10px;
+		font-size: 13px;
+	}
+
+	.custom-rule-editor button {
+		white-space: nowrap;
+	}
+
+	@media (max-width: 560px) {
+		.custom-rule-editor {
+			grid-template-columns: 1fr;
+		}
+
+		.custom-rule-editor button {
+			width: 100%;
+		}
 	}
 
 	/* Progress */
