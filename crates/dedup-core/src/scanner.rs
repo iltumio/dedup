@@ -9,7 +9,7 @@ use walkdir::WalkDir;
 use crate::cid as cid_util;
 use crate::content_store::ContentStore;
 use crate::metadata::MetadataDb;
-use crate::types::{DirMetadata, FileMetadata, ScanProgress, ScanStats};
+use crate::types::{DirMetadata, FileMetadata, ScanOptions, ScanProgress, ScanStats};
 
 /// Scan a source directory and replicate it into a content-addressed store.
 ///
@@ -49,12 +49,36 @@ pub fn scan_directory_into<F>(
 where
     F: Fn(&ScanProgress),
 {
-    scan_directory_into_with_cancellation(
+    scan_directory_into_with_options(
         source,
         target_prefix,
         store_root,
         content_store,
         metadata_db,
+        ScanOptions::default(),
+        on_progress,
+    )
+}
+
+pub fn scan_directory_into_with_options<F>(
+    source: &Path,
+    target_prefix: &str,
+    store_root: &Path,
+    content_store: &ContentStore,
+    metadata_db: &MetadataDb,
+    options: ScanOptions,
+    on_progress: F,
+) -> Result<ScanStats>
+where
+    F: Fn(&ScanProgress),
+{
+    scan_directory_into_with_options_and_cancellation(
+        source,
+        target_prefix,
+        store_root,
+        content_store,
+        metadata_db,
+        options,
         on_progress,
         || false,
     )
@@ -75,6 +99,34 @@ where
     F: Fn(&ScanProgress),
     C: Fn() -> bool,
 {
+    scan_directory_into_with_options_and_cancellation(
+        source,
+        target_prefix,
+        store_root,
+        content_store,
+        metadata_db,
+        ScanOptions::default(),
+        on_progress,
+        should_cancel,
+    )
+}
+
+pub fn scan_directory_into_with_options_and_cancellation<F, C>(
+    source: &Path,
+    target_prefix: &str,
+    store_root: &Path,
+    content_store: &ContentStore,
+    metadata_db: &MetadataDb,
+    options: ScanOptions,
+    on_progress: F,
+    should_cancel: C,
+) -> Result<ScanStats>
+where
+    F: Fn(&ScanProgress),
+    C: Fn() -> bool,
+{
+    let _ = options;
+
     let source = source
         .canonicalize()
         .with_context(|| format!("source directory not found: {}", source.display()))?;
@@ -350,6 +402,65 @@ mod tests {
         let metadata_db = MetadataDb::open(&db_path).unwrap();
 
         (source_dir, store_dir, content_store, metadata_db)
+    }
+
+    #[test]
+    fn default_scan_still_indexes_git_directory_entries() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir(source_dir.path().join(".git")).unwrap();
+        fs::write(
+            source_dir.path().join(".git/HEAD"),
+            b"ref: refs/heads/main\n",
+        )
+        .unwrap();
+        fs::create_dir_all(source_dir.path().join(".git/refs/heads")).unwrap();
+        fs::write(source_dir.path().join(".git/refs/heads/main"), b"abc123\n").unwrap();
+
+        let stats = scan_directory_into(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 2);
+        assert!(metadata_db.get_file("/repo/.git/HEAD").unwrap().is_some());
+        assert!(metadata_db
+            .get_file("/repo/.git/refs/heads/main")
+            .unwrap()
+            .is_some());
+        assert!(metadata_db.get_file("/repo/.git.tar").unwrap().is_none());
+    }
+
+    #[test]
+    fn scan_options_default_does_not_bundle_git_directories() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir(source_dir.path().join(".git")).unwrap();
+        fs::write(
+            source_dir.path().join(".git/HEAD"),
+            b"ref: refs/heads/main\n",
+        )
+        .unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 1);
+        assert!(metadata_db.get_file("/repo/.git/HEAD").unwrap().is_some());
+        assert!(metadata_db.get_file("/repo/.git.tar").unwrap().is_none());
     }
 
     #[test]

@@ -14,7 +14,9 @@ pub mod types;
 
 pub use content_store::ContentStore;
 pub use metadata::MetadataDb;
-pub use types::{DirEntry, DirMetadata, ExtensionStats, FileMetadata, ScanProgress, ScanStats};
+pub use types::{
+    DirEntry, DirMetadata, ExtensionStats, FileMetadata, ScanOptions, ScanProgress, ScanStats,
+};
 
 use std::path::{Path, PathBuf};
 

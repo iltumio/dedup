@@ -100,6 +100,13 @@ pub struct ScanProgress {
     pub current_file: String,
 }
 
+/// Options controlling scan behavior.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct ScanOptions {
+    /// Store each `.git` directory as one archive blob instead of scanning entries.
+    pub bundle_git_dirs: bool,
+}
+
 /// Per-extension statistics for analytics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionStats {
