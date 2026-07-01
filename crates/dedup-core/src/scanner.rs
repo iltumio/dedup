@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -254,7 +253,6 @@ where
         }};
     }
 
-    let mut reserved_git_archive_paths = HashSet::new();
     let mut walker = WalkDir::new(&source).follow_links(false).into_iter();
     while let Some(entry) = walker.next() {
         if should_cancel() {
@@ -301,7 +299,13 @@ where
             format!("{prefix}/{rel_str}")
         };
 
-        if let Some(rule) = matching_rule(&compiled_rules, &rel_str) {
+        let matched_rule = if rel_str.is_empty() {
+            None
+        } else {
+            matching_rule(&compiled_rules, &rel_str)
+        };
+
+        if let Some(rule) = matched_rule {
             match rule.action {
                 ScanRuleAction::Ignore => {
                     stats.skipped_files += 1;
@@ -317,14 +321,67 @@ where
                         emit_skipped_progress(virtual_path, &stats, &on_progress);
                         continue;
                     }
+
+                    let archive_virtual_path = format!("{virtual_path}.tar");
+                    let root_name = archive_root_name(abs_path);
+                    let archive_data =
+                        match build_directory_archive(&root_name, abs_path, &should_cancel) {
+                            Ok(data) => data,
+                            Err(err) => {
+                                if is_scan_cancelled_error(&err) {
+                                    return Err(err);
+                                }
+
+                                let msg = format!("failed to archive directory: {err}");
+                                (|| {
+                                    log_error!(
+                                        &mut error_log,
+                                        error_log_path,
+                                        msg,
+                                        archive_virtual_path.clone()
+                                    )
+                                })();
+                                stats.skipped_files += 1;
+                                emit_skipped_progress(archive_virtual_path, &stats, &on_progress);
+                                walker.skip_current_dir();
+                                continue;
+                            }
+                        };
+
+                    let fs_meta = match fs::metadata(abs_path) {
+                        Ok(m) => m,
+                        Err(err) => {
+                            let msg = format!("failed to read metadata: {err}");
+                            let display = abs_path.display().to_string();
+                            (|| log_error!(&mut error_log, error_log_path, msg, display))();
+                            stats.skipped_files += 1;
+                            emit_skipped_progress(archive_virtual_path, &stats, &on_progress);
+                            walker.skip_current_dir();
+                            continue;
+                        }
+                    };
+
+                    let modified = extract_mtime(&fs_meta);
+                    let created = extract_ctime(&fs_meta);
+                    store_virtual_file(
+                        &archive_virtual_path,
+                        &archive_data,
+                        modified,
+                        created,
+                        0o644,
+                        content_store,
+                        metadata_db,
+                        &mut stats,
+                        &on_progress,
+                    )?;
+
+                    walker.skip_current_dir();
+                    continue;
                 }
             }
         }
 
-        if options.bundle_git_dirs
-            && (reserved_git_archive_paths.contains(&virtual_path)
-                || has_real_sibling_git_dir_for_git_tar_collision(abs_path))
-        {
+        if options.bundle_git_dirs && has_real_sibling_git_dir_for_git_tar_collision(abs_path) {
             let msg = "virtual path collision: .git.tar is reserved for bundled .git directory"
                 .to_string();
             (|| log_error!(&mut error_log, error_log_path, msg, virtual_path.clone()))();
@@ -355,64 +412,6 @@ where
                 continue;
             }
         };
-
-        if options.bundle_git_dirs
-            && entry_file_type.is_dir()
-            && abs_path
-                .file_name()
-                .map(|name| name == ".git")
-                .unwrap_or(false)
-        {
-            let archive_virtual_path = format!("{virtual_path}.tar");
-            let archive_data = match build_git_directory_archive(abs_path, &should_cancel) {
-                Ok(data) => data,
-                Err(err) => {
-                    if is_scan_cancelled_error(&err) {
-                        return Err(err);
-                    }
-
-                    let msg = format!("failed to archive .git directory: {err}");
-                    (|| {
-                        log_error!(
-                            &mut error_log,
-                            error_log_path,
-                            msg,
-                            archive_virtual_path.clone()
-                        )
-                    })();
-                    stats.skipped_files += 1;
-                    on_progress(&ScanProgress {
-                        files_processed: stats.total_files,
-                        dirs_processed: stats.total_dirs,
-                        bytes_processed: stats.total_original_bytes,
-                        bytes_stored: stats.total_stored_bytes,
-                        duplicates_found: stats.duplicate_files,
-                        skipped_files: stats.skipped_files,
-                        current_file: archive_virtual_path,
-                    });
-                    walker.skip_current_dir();
-                    continue;
-                }
-            };
-
-            let modified = extract_mtime(&fs_meta);
-            let created = extract_ctime(&fs_meta);
-            store_virtual_file(
-                &archive_virtual_path,
-                &archive_data,
-                modified,
-                created,
-                0o644,
-                content_store,
-                metadata_db,
-                &mut stats,
-                &on_progress,
-            )?;
-            reserved_git_archive_paths.insert(archive_virtual_path);
-
-            walker.skip_current_dir();
-            continue;
-        }
 
         if fs_meta.is_dir() {
             let modified = extract_mtime(&fs_meta);
@@ -482,7 +481,7 @@ where
     Ok(stats)
 }
 
-struct GitArchiveEntry {
+struct DirectoryArchiveEntry {
     archive_path: String,
     source_path: PathBuf,
     is_dir: bool,
@@ -516,21 +515,25 @@ where
     }
 }
 
-fn build_git_directory_archive<C>(git_dir: &Path, should_cancel: &C) -> Result<Vec<u8>>
+fn build_directory_archive<C>(
+    archive_root_name: &str,
+    dir: &Path,
+    should_cancel: &C,
+) -> Result<Vec<u8>>
 where
     C: Fn() -> bool,
 {
     let mut entries = Vec::new();
 
-    for entry in WalkDir::new(git_dir).follow_links(false).min_depth(1) {
+    for entry in WalkDir::new(dir).follow_links(false).min_depth(1) {
         if should_cancel() {
             bail!("scan cancelled");
         }
 
         let entry = entry.with_context(|| {
             format!(
-                "failed to read .git archive entry under {}",
-                git_dir.display()
+                "failed to read directory archive entry under {}",
+                dir.display()
             )
         })?;
         let file_type = entry.file_type();
@@ -539,15 +542,14 @@ where
             continue;
         }
 
-        let relative = entry.path().strip_prefix(git_dir).with_context(|| {
+        let relative = entry.path().strip_prefix(dir).with_context(|| {
             format!(
-                "failed to compute .git archive path for {}",
+                "failed to compute directory archive path for {}",
                 entry.path().display()
             )
         })?;
-        let relative = relative.to_string_lossy().replace('\\', "/");
-        entries.push(GitArchiveEntry {
-            archive_path: format!(".git/{relative}"),
+        entries.push(DirectoryArchiveEntry {
+            archive_path: archive_relative_path(archive_root_name, relative),
             source_path: entry.path().to_path_buf(),
             is_dir: file_type.is_dir(),
         });
@@ -556,6 +558,17 @@ where
     entries.sort_by(|left, right| left.archive_path.cmp(&right.archive_path));
 
     let mut archive = tar::Builder::new(Vec::new());
+    if entries.is_empty() {
+        if should_cancel() {
+            bail!("scan cancelled");
+        }
+
+        let mut header = deterministic_tar_header(0, 0o755, tar::EntryType::Directory)?;
+        archive
+            .append_data(&mut header, Path::new(archive_root_name), io::empty())
+            .with_context(|| format!("failed to append archive dir: {archive_root_name}"))?;
+    }
+
     for entry in entries {
         if should_cancel() {
             bail!("scan cancelled");
@@ -569,7 +582,7 @@ where
         } else {
             let file = fs::File::open(&entry.source_path).with_context(|| {
                 format!(
-                    "failed to open .git archive file: {}",
+                    "failed to open directory archive file: {}",
                     entry.source_path.display()
                 )
             })?;
@@ -577,7 +590,7 @@ where
                 .metadata()
                 .with_context(|| {
                     format!(
-                        "failed to read .git archive file metadata: {}",
+                        "failed to read directory archive file metadata: {}",
                         entry.source_path.display()
                     )
                 })?
@@ -599,7 +612,21 @@ where
 
     archive
         .into_inner()
-        .context("failed to finish .git directory archive")
+        .context("failed to finish directory archive")
+}
+
+fn archive_relative_path(archive_root_name: &str, relative: &Path) -> String {
+    let mut parts = vec![archive_root_name.to_string()];
+    for component in relative.components() {
+        parts.push(component.as_os_str().to_string_lossy().to_string());
+    }
+    parts.join("/")
+}
+
+fn archive_root_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "archive".to_string())
 }
 
 fn is_scan_cancelled_error(err: &anyhow::Error) -> bool {
@@ -783,6 +810,217 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(metadata_db.list_dir("/repo/target").unwrap().is_empty());
+    }
+
+    #[test]
+    fn archive_rule_stores_matching_directory_as_tar() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir_all(source_dir.path().join("cache/sub")).unwrap();
+        fs::write(source_dir.path().join("cache/sub/item"), b"cached").unwrap();
+        fs::write(source_dir.path().join("keep.txt"), b"keep").unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![ScanRule::new(r"(^|/)cache$", ScanRuleAction::Archive)],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 2);
+        assert!(metadata_db.get_file("/repo/cache.tar").unwrap().is_some());
+        assert!(metadata_db
+            .get_file("/repo/cache/sub/item")
+            .unwrap()
+            .is_none());
+        assert!(metadata_db.get_file("/repo/keep.txt").unwrap().is_some());
+
+        let archive_meta = metadata_db.get_file("/repo/cache.tar").unwrap().unwrap();
+        let archive_cid = cid_util::cid_from_bytes(&archive_meta.cid).unwrap();
+        let archive_bytes = content_store.read(&archive_cid).unwrap();
+        let mut archive = tar::Archive::new(std::io::Cursor::new(archive_bytes));
+        let names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert!(names.contains(&"cache/sub/item".to_string()));
+    }
+
+    #[test]
+    fn archive_rule_preserves_empty_directory_root_entry() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir(source_dir.path().join("cache")).unwrap();
+
+        scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![ScanRule::new(r"(^|/)cache$", ScanRuleAction::Archive)],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        let archive_meta = metadata_db
+            .get_file("/repo/cache.tar")
+            .unwrap()
+            .expect("expected cache.tar metadata");
+        let archive_cid = cid_util::cid_from_bytes(&archive_meta.cid).unwrap();
+        let archive_bytes = content_store.read(&archive_cid).unwrap();
+        let mut archive = tar::Archive::new(std::io::Cursor::new(archive_bytes));
+        let entries: Vec<(String, tar::EntryType)> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let path = entry.path().unwrap().to_string_lossy().to_string();
+                let entry_type = entry.header().entry_type();
+                (path, entry_type)
+            })
+            .collect();
+
+        assert!(entries.iter().any(|(path, entry_type)| {
+            (path == "cache" || path == "cache/") && *entry_type == tar::EntryType::Directory
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_rule_preserves_backslashes_inside_path_components() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir(source_dir.path().join("cache")).unwrap();
+        fs::write(source_dir.path().join("cache").join(r"a\b"), b"cached").unwrap();
+
+        scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![ScanRule::new(r"(^|/)cache$", ScanRuleAction::Archive)],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        let archive_meta = metadata_db
+            .get_file("/repo/cache.tar")
+            .unwrap()
+            .expect("expected cache.tar metadata");
+        let archive_cid = cid_util::cid_from_bytes(&archive_meta.cid).unwrap();
+        let archive_bytes = content_store.read(&archive_cid).unwrap();
+        let mut archive = tar::Archive::new(std::io::Cursor::new(archive_bytes));
+        let names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        assert!(names.contains(&r"cache/a\b".to_string()));
+        assert!(!names.contains(&"cache/a/b".to_string()));
+    }
+
+    #[test]
+    fn scan_rules_do_not_match_scan_root() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::write(source_dir.path().join("file.txt"), b"content").unwrap();
+
+        scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![ScanRule::new(r"^$", ScanRuleAction::Archive)],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert!(metadata_db.get_file("/repo.tar").unwrap().is_none());
+        assert!(metadata_db.get_file("/repo/file.txt").unwrap().is_some());
+    }
+
+    #[test]
+    fn archive_rule_matching_regular_file_skips_it() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::write(source_dir.path().join("cache"), b"not a directory").unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![ScanRule::new(r"(^|/)cache$", ScanRuleAction::Archive)],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 0);
+        assert_eq!(stats.skipped_files, 1);
+        assert!(metadata_db.get_file("/repo/cache").unwrap().is_none());
+        assert!(metadata_db.get_file("/repo/cache.tar").unwrap().is_none());
+    }
+
+    #[test]
+    fn scan_rules_use_first_match() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir_all(source_dir.path().join("cache/sub")).unwrap();
+        fs::write(source_dir.path().join("cache/sub/item"), b"cached").unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                rules: vec![
+                    ScanRule::new(r"(^|/)cache$", ScanRuleAction::Ignore),
+                    ScanRule::new(r"(^|/)cache$", ScanRuleAction::Archive),
+                ],
+                ..ScanOptions::default()
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.total_files, 0);
+        assert_eq!(stats.skipped_files, 1);
+        assert!(metadata_db.get_file("/repo/cache.tar").unwrap().is_none());
     }
 
     #[test]
@@ -1108,7 +1346,7 @@ mod tests {
 
         use std::sync::atomic::{AtomicUsize, Ordering};
         let cancel_checks = AtomicUsize::new(0);
-        let result = build_git_directory_archive(&git_dir, &|| {
+        let result = build_directory_archive(".git", &git_dir, &|| {
             cancel_checks.fetch_add(1, Ordering::SeqCst) >= 3
         });
 
