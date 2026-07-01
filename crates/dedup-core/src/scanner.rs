@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -197,7 +198,11 @@ where
         }};
     }
 
-    let mut walker = WalkDir::new(&source).follow_links(false).into_iter();
+    let mut reserved_git_archive_paths = HashSet::new();
+    let mut walker = WalkDir::new(&source)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter();
     while let Some(entry) = walker.next() {
         if should_cancel() {
             bail!("scan cancelled");
@@ -265,7 +270,7 @@ where
             let archive_data = match build_git_directory_archive(abs_path, &should_cancel) {
                 Ok(data) => data,
                 Err(err) => {
-                    if err.to_string().contains("scan cancelled") {
+                    if is_scan_cancelled_error(&err) {
                         return Err(err);
                     }
 
@@ -306,6 +311,7 @@ where
                 &mut stats,
                 &on_progress,
             )?;
+            reserved_git_archive_paths.insert(archive_virtual_path);
 
             walker.skip_current_dir();
             continue;
@@ -324,6 +330,23 @@ where
 
             stats.total_dirs += 1;
         } else if fs_meta.is_file() {
+            if options.bundle_git_dirs && reserved_git_archive_paths.contains(&virtual_path) {
+                let msg = "virtual path collision: .git.tar is reserved for bundled .git directory"
+                    .to_string();
+                (|| log_error!(&mut error_log, error_log_path, msg, virtual_path.clone()))();
+                stats.skipped_files += 1;
+                on_progress(&ScanProgress {
+                    files_processed: stats.total_files,
+                    dirs_processed: stats.total_dirs,
+                    bytes_processed: stats.total_original_bytes,
+                    bytes_stored: stats.total_stored_bytes,
+                    duplicates_found: stats.duplicate_files,
+                    skipped_files: stats.skipped_files,
+                    current_file: virtual_path,
+                });
+                continue;
+            }
+
             // Read file content — skip on error
             let data = match fs::read(abs_path) {
                 Ok(d) => d,
@@ -385,6 +408,34 @@ struct GitArchiveEntry {
     is_dir: bool,
 }
 
+struct CancellableReader<'a, R, C> {
+    inner: R,
+    should_cancel: &'a C,
+}
+
+impl<'a, R, C> CancellableReader<'a, R, C> {
+    fn new(inner: R, should_cancel: &'a C) -> Self {
+        Self {
+            inner,
+            should_cancel,
+        }
+    }
+}
+
+impl<R, C> Read for CancellableReader<'_, R, C>
+where
+    R: Read,
+    C: Fn() -> bool,
+{
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if (self.should_cancel)() {
+            return Err(io::Error::new(io::ErrorKind::Other, "scan cancelled"));
+        }
+
+        self.inner.read(buf)
+    }
+}
+
 fn build_git_directory_archive<C>(git_dir: &Path, should_cancel: &C) -> Result<Vec<u8>>
 where
     C: Fn() -> bool,
@@ -436,21 +487,30 @@ where
                 .append_data(&mut header, Path::new(&entry.archive_path), io::empty())
                 .with_context(|| format!("failed to append archive dir: {}", entry.archive_path))?;
         } else {
-            let data = fs::read(&entry.source_path).with_context(|| {
+            let file = fs::File::open(&entry.source_path).with_context(|| {
                 format!(
-                    "failed to read .git archive file: {}",
+                    "failed to open .git archive file: {}",
                     entry.source_path.display()
                 )
             })?;
+            let file_size = file
+                .metadata()
+                .with_context(|| {
+                    format!(
+                        "failed to read .git archive file metadata: {}",
+                        entry.source_path.display()
+                    )
+                })?
+                .len();
 
             if should_cancel() {
                 bail!("scan cancelled");
             }
 
-            let mut header =
-                deterministic_tar_header(data.len() as u64, 0o644, tar::EntryType::Regular)?;
+            let mut header = deterministic_tar_header(file_size, 0o644, tar::EntryType::Regular)?;
+            let reader = CancellableReader::new(file, should_cancel);
             archive
-                .append_data(&mut header, Path::new(&entry.archive_path), data.as_slice())
+                .append_data(&mut header, Path::new(&entry.archive_path), reader)
                 .with_context(|| {
                     format!("failed to append archive file: {}", entry.archive_path)
                 })?;
@@ -460,6 +520,11 @@ where
     archive
         .into_inner()
         .context("failed to finish .git directory archive")
+}
+
+fn is_scan_cancelled_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string() == "scan cancelled")
 }
 
 fn deterministic_tar_header(
@@ -709,6 +774,77 @@ mod tests {
 
         assert!(archive_paths.contains(&".git/HEAD".to_string()));
         assert!(archive_paths.contains(&".git/refs/heads/main".to_string()));
+    }
+
+    #[test]
+    fn bundle_git_dirs_skips_real_file_colliding_with_git_tar_path() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir(source_dir.path().join(".git")).unwrap();
+        fs::write(
+            source_dir.path().join(".git/HEAD"),
+            b"ref: refs/heads/main\n",
+        )
+        .unwrap();
+        fs::write(source_dir.path().join(".git.tar"), b"real file bytes").unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                bundle_git_dirs: true,
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.skipped_files, 1);
+
+        let git_tar_meta = metadata_db
+            .get_file("/repo/.git.tar")
+            .unwrap()
+            .expect("expected .git.tar metadata");
+        let git_tar_cid = cid_util::cid_from_bytes(&git_tar_meta.cid).unwrap();
+        let git_tar_data = content_store.read(&git_tar_cid).unwrap();
+
+        assert_ne!(git_tar_data, b"real file bytes");
+
+        let mut archive = tar::Archive::new(std::io::Cursor::new(git_tar_data));
+        let archive_paths: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+
+        assert!(archive_paths.contains(&".git/HEAD".to_string()));
+    }
+
+    #[test]
+    fn build_git_archive_observes_cancellation_while_streaming_file() {
+        let source_dir = TempDir::new().unwrap();
+        let git_dir = source_dir.path().join(".git");
+
+        fs::create_dir(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cancel_checks = AtomicUsize::new(0);
+        let result = build_git_directory_archive(&git_dir, &|| {
+            cancel_checks.fetch_add(1, Ordering::SeqCst) >= 3
+        });
+
+        let err = result.unwrap_err();
+        assert!(is_scan_cancelled_error(&err));
     }
 
     #[test]
