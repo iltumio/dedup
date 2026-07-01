@@ -40,129 +40,46 @@
 		onSelect(fullPath, entry);
 	}
 
-	function handleScanInto(e: MouseEvent | KeyboardEvent) {
+	function handleScanInto(e: MouseEvent) {
 		e.stopPropagation();
 		onScanInto(fullPath);
 	}
 </script>
 
-<li class="tree-node">
-	<button
-		class="node-button"
-		class:selected={isSelected}
-		class:directory={entry.is_dir}
-		onclick={toggle}
-	>
-		<span class="icon">
-			{#if entry.is_dir}
-				{expanded ? '📂' : '📁'}
-			{:else}
-				📄
+<li class="list-none">
+	<div class="group flex items-center gap-1">
+		<button
+			class={`min-w-0 flex flex-1 items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-base-200 ${isSelected ? 'bg-primary text-primary-content' : ''}`}
+			type="button"
+			onclick={toggle}
+		>
+			<span class="shrink-0 text-xs">{entry.is_dir ? (expanded ? '▾' : '▸') : '·'}</span>
+			<span class="min-w-0 flex-1 truncate">{entry.name}</span>
+			{#if !entry.is_dir}
+				<span class="font-path shrink-0 text-[11px] opacity-60">{formatSize(entry.size)}</span>
 			{/if}
-		</span>
-		<span class="name">{entry.name}</span>
-		{#if !entry.is_dir}
-			<span class="size">{formatSize(entry.size)}</span>
-		{/if}
+			{#if loading}
+				<span class="loading loading-spinner loading-xs"></span>
+			{/if}
+		</button>
 		{#if entry.is_dir}
-			<span class="scan-into-btn" role="button" tabindex="0" onclick={handleScanInto} onkeydown={(e) => e.key === 'Enter' && handleScanInto(e)} title="Scan into this directory">+</span>
+			<button
+				class="btn btn-ghost btn-xs opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100"
+				type="button"
+				onclick={handleScanInto}
+				title="Scan into this directory"
+				aria-label={`Scan into ${entry.name}`}
+			>
+				+
+			</button>
 		{/if}
-		{#if loading}
-			<span class="loading">...</span>
-		{/if}
-	</button>
+	</div>
 
 	{#if expanded && children.length > 0}
-		<ul class="children">
+		<ul class="pl-4">
 			{#each children as child (child.name)}
-				<TreeNode
-					entry={child}
-					parentPath={fullPath}
-					{selectedPath}
-					{onSelect}
-					{onScanInto}
-				/>
+				<TreeNode entry={child} parentPath={fullPath} {selectedPath} {onSelect} {onScanInto} />
 			{/each}
 		</ul>
 	{/if}
 </li>
-
-<style>
-	.tree-node {
-		list-style: none;
-	}
-
-	.node-button {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		width: 100%;
-		padding: 4px 8px;
-		border-radius: 4px;
-		font-size: 13px;
-		text-align: left;
-		transition: background 0.1s;
-	}
-
-	.node-button:hover {
-		background: var(--app-bg-hover);
-	}
-
-	.node-button.selected {
-		background: var(--app-accent);
-	}
-
-	.icon {
-		flex-shrink: 0;
-		font-size: 14px;
-	}
-
-	.name {
-		flex: 1;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.size {
-		flex-shrink: 0;
-		color: var(--app-text-muted);
-		font-size: 11px;
-		font-family: var(--app-font-mono);
-	}
-
-	.loading {
-		color: var(--app-text-muted);
-		font-size: 11px;
-	}
-
-	.scan-into-btn {
-		flex-shrink: 0;
-		display: none;
-		align-items: center;
-		justify-content: center;
-		width: 20px;
-		height: 20px;
-		border-radius: 3px;
-		background: var(--app-accent);
-		color: var(--app-text);
-		font-size: 14px;
-		font-weight: bold;
-		line-height: 1;
-		cursor: pointer;
-		border: none;
-		padding: 0;
-	}
-
-	.scan-into-btn:hover {
-		background: var(--app-accent-hover);
-	}
-
-	.node-button:hover .scan-into-btn {
-		display: flex;
-	}
-
-	.children {
-		padding-left: 16px;
-	}
-</style>

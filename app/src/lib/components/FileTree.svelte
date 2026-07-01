@@ -28,105 +28,50 @@
 	});
 </script>
 
-<div class="file-tree">
-	<div class="header">
-		<span class="title">Files</span>
-		<div class="header-actions">
-			<button class="action-btn" onclick={() => onScanInto('/')} title="Scan into root">+</button>
-			<button class="action-btn" onclick={loadRoot} title="Refresh">⟳</button>
+<div class="flex h-full min-h-0 flex-col">
+	<header class="flex h-10 shrink-0 items-center justify-between border-b border-base-300 px-3">
+		<span class="text-sm font-semibold">Files</span>
+		<div class="flex gap-1">
+			<button
+				class="btn btn-ghost btn-xs"
+				type="button"
+				onclick={() => onScanInto('/')}
+				title="Scan into root"
+				aria-label="Scan into root"
+			>
+				+
+			</button>
+			<button
+				class="btn btn-ghost btn-xs"
+				type="button"
+				onclick={loadRoot}
+				title="Refresh files"
+			>
+				Refresh
+			</button>
 		</div>
-	</div>
+	</header>
 
 	{#if error}
-		<div class="error">{error}</div>
+		<div class="alert alert-error m-3 py-2 text-sm">{error}</div>
 	{:else if rootEntries.length === 0}
-		<div class="empty">
-			<p>No files yet.</p>
-			<button class="empty-scan-btn" onclick={() => onScanInto('/')}>Scan a directory</button>
+		<div class="p-3">
+			<div class="rounded-box border border-base-300 bg-base-200 p-4">
+				<p class="text-sm text-base-content/60">No files yet.</p>
+				<button
+					class="btn btn-primary btn-sm mt-3"
+					type="button"
+					onclick={() => onScanInto('/')}
+				>
+					Scan a directory
+				</button>
+			</div>
 		</div>
 	{:else}
-		<ul class="tree-root">
+		<ul class="min-h-0 flex-1 overflow-y-auto p-2">
 			{#each rootEntries as entry (entry.name)}
-				<TreeNode
-					{entry}
-					parentPath="/"
-					{selectedPath}
-					{onSelect}
-					{onScanInto}
-				/>
+				<TreeNode {entry} parentPath="/" {selectedPath} {onSelect} {onScanInto} />
 			{/each}
 		</ul>
 	{/if}
 </div>
-
-<style>
-	.file-tree {
-		height: 100%;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-	}
-
-	.header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		padding: 12px 16px;
-		border-bottom: 1px solid var(--app-border-color);
-	}
-
-	.title {
-		font-weight: 600;
-		font-size: 14px;
-	}
-
-	.header-actions {
-		display: flex;
-		gap: 4px;
-	}
-
-	.action-btn {
-		font-size: 16px;
-		padding: 4px 6px;
-		border-radius: 4px;
-		line-height: 1;
-	}
-
-	.action-btn:hover {
-		background: var(--app-bg-hover);
-	}
-
-	.tree-root {
-		flex: 1;
-		overflow-y: auto;
-		padding: 8px;
-	}
-
-	.error {
-		padding: 16px;
-		color: var(--app-duplicate);
-		font-size: 13px;
-	}
-
-	.empty {
-		padding: 16px;
-		color: var(--app-text-muted);
-		font-size: 13px;
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-		align-items: flex-start;
-	}
-
-	.empty-scan-btn {
-		padding: 6px 12px;
-		background: var(--app-accent);
-		border-radius: 6px;
-		font-size: 12px;
-		font-weight: 500;
-	}
-
-	.empty-scan-btn:hover {
-		background: var(--app-accent-light);
-	}
-</style>
