@@ -199,10 +199,7 @@ where
     }
 
     let mut reserved_git_archive_paths = HashSet::new();
-    let mut walker = WalkDir::new(&source)
-        .follow_links(false)
-        .sort_by_file_name()
-        .into_iter();
+    let mut walker = WalkDir::new(&source).follow_links(false).into_iter();
     while let Some(entry) = walker.next() {
         if should_cancel() {
             bail!("scan cancelled");
@@ -222,6 +219,7 @@ where
             }
         };
         let abs_path = entry.path();
+        let entry_file_type = entry.file_type();
 
         // Compute virtual path relative to source root
         let relative = match abs_path.strip_prefix(&source) {
@@ -247,6 +245,29 @@ where
             format!("{prefix}/{rel_str}")
         };
 
+        if options.bundle_git_dirs
+            && (reserved_git_archive_paths.contains(&virtual_path)
+                || has_real_sibling_git_dir_for_git_tar_collision(abs_path))
+        {
+            let msg = "virtual path collision: .git.tar is reserved for bundled .git directory"
+                .to_string();
+            (|| log_error!(&mut error_log, error_log_path, msg, virtual_path.clone()))();
+            stats.skipped_files += 1;
+            on_progress(&ScanProgress {
+                files_processed: stats.total_files,
+                dirs_processed: stats.total_dirs,
+                bytes_processed: stats.total_original_bytes,
+                bytes_stored: stats.total_stored_bytes,
+                duplicates_found: stats.duplicate_files,
+                skipped_files: stats.skipped_files,
+                current_file: virtual_path,
+            });
+            if entry_file_type.is_dir() {
+                walker.skip_current_dir();
+            }
+            continue;
+        }
+
         // Read filesystem metadata — skip on error
         let fs_meta = match fs::metadata(abs_path) {
             Ok(m) => m,
@@ -260,7 +281,7 @@ where
         };
 
         if options.bundle_git_dirs
-            && fs_meta.is_dir()
+            && entry_file_type.is_dir()
             && abs_path
                 .file_name()
                 .map(|name| name == ".git")
@@ -330,23 +351,6 @@ where
 
             stats.total_dirs += 1;
         } else if fs_meta.is_file() {
-            if options.bundle_git_dirs && reserved_git_archive_paths.contains(&virtual_path) {
-                let msg = "virtual path collision: .git.tar is reserved for bundled .git directory"
-                    .to_string();
-                (|| log_error!(&mut error_log, error_log_path, msg, virtual_path.clone()))();
-                stats.skipped_files += 1;
-                on_progress(&ScanProgress {
-                    files_processed: stats.total_files,
-                    dirs_processed: stats.total_dirs,
-                    bytes_processed: stats.total_original_bytes,
-                    bytes_stored: stats.total_stored_bytes,
-                    duplicates_found: stats.duplicate_files,
-                    skipped_files: stats.skipped_files,
-                    current_file: virtual_path,
-                });
-                continue;
-            }
-
             // Read file content — skip on error
             let data = match fs::read(abs_path) {
                 Ok(d) => d,
@@ -525,6 +529,22 @@ where
 fn is_scan_cancelled_error(err: &anyhow::Error) -> bool {
     err.chain()
         .any(|cause| cause.to_string() == "scan cancelled")
+}
+
+fn has_real_sibling_git_dir_for_git_tar_collision(path: &Path) -> bool {
+    if !path
+        .file_name()
+        .map(|name| name == ".git.tar")
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    path.parent()
+        .map(|parent| parent.join(".git"))
+        .and_then(|git_dir| fs::symlink_metadata(git_dir).ok())
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
 }
 
 fn deterministic_tar_header(
@@ -827,6 +847,71 @@ mod tests {
             .collect();
 
         assert!(archive_paths.contains(&".git/HEAD".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_git_dirs_does_not_bundle_symlink_named_git() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        let outside_dir = TempDir::new().unwrap();
+        fs::write(outside_dir.path().join("HEAD"), b"outside git data").unwrap();
+        std::os::unix::fs::symlink(outside_dir.path(), source_dir.path().join(".git")).unwrap();
+
+        let _stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                bundle_git_dirs: true,
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert!(metadata_db.get_file("/repo/.git.tar").unwrap().is_none());
+    }
+
+    #[test]
+    fn bundle_git_dirs_skips_real_directory_colliding_with_git_tar_path() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::create_dir(source_dir.path().join(".git")).unwrap();
+        fs::write(
+            source_dir.path().join(".git/HEAD"),
+            b"ref: refs/heads/main\n",
+        )
+        .unwrap();
+        fs::create_dir(source_dir.path().join(".git.tar")).unwrap();
+        fs::write(source_dir.path().join(".git.tar/nested"), b"nested").unwrap();
+
+        let stats = scan_directory_into_with_options(
+            source_dir.path(),
+            "/repo",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            ScanOptions {
+                bundle_git_dirs: true,
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(stats.skipped_files, 1);
+        assert!(metadata_db.get_file("/repo/.git.tar").unwrap().is_some());
+        let repo_entries = metadata_db.list_dir("/repo").unwrap();
+        let git_tar_entry = repo_entries
+            .iter()
+            .find(|entry| entry.name == ".git.tar")
+            .expect("expected .git.tar entry");
+        assert!(!git_tar_entry.is_dir);
+        assert!(metadata_db
+            .get_file("/repo/.git.tar/nested")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
