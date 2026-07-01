@@ -36,13 +36,19 @@
 		ghost: 'btn-ghost',
 		destructive: 'btn-error'
 	};
+
+	const sizeClass: Record<Size, string> = {
+		xs: 'btn-xs',
+		sm: 'btn-sm',
+		md: 'btn-md'
+	};
 </script>
 
 <button
 	{type}
 	{title}
 	aria-label={ariaLabel}
-	class={`btn btn-${size} ${variantClass[variant]} ${loading ? 'btn-disabled' : ''} ${className}`}
+	class={`btn ${sizeClass[size]} ${variantClass[variant]} ${loading ? 'btn-disabled' : ''} ${className}`}
 	disabled={disabled || loading}
 	{onclick}
 >

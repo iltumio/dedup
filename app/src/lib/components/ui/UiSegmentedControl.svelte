@@ -14,12 +14,11 @@
 	let { value, options, onChange, ariaLabel }: Props<T> = $props();
 </script>
 
-<div class="join" role="tablist" aria-label={ariaLabel}>
+<div class="join" role="group" aria-label={ariaLabel}>
 	{#each options as option}
 		<button
 			type="button"
-			role="tab"
-			aria-selected={value === option.value}
+			aria-pressed={value === option.value}
 			class={`btn btn-xs join-item ${value === option.value ? 'btn-primary' : 'btn-neutral'}`}
 			onclick={() => onChange(option.value)}
 		>
