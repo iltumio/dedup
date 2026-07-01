@@ -32,12 +32,35 @@ pub struct Workspace {
     pub stats: WorkspaceStats,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomScanRuleAction {
+    Ignore,
+    Archive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomScanRule {
+    pub id: String,
+    pub label: String,
+    pub pattern: String,
+    pub action: CustomScanRuleAction,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// The workspaces config file format.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspacesConfig {
     pub workspaces: Vec<Workspace>,
     /// ID of the currently active workspace (if any).
     pub active_workspace_id: Option<String>,
+    #[serde(default)]
+    pub custom_scan_rules: Vec<CustomScanRule>,
 }
 
 impl WorkspacesConfig {
@@ -94,4 +117,56 @@ pub fn generate_id() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("ws_{ts:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_missing_custom_scan_rules_as_empty() {
+        let config: WorkspacesConfig = serde_json::from_str(
+            r#"{
+                "workspaces": [],
+                "active_workspace_id": null
+            }"#,
+        )
+        .expect("config should deserialize");
+
+        assert!(config.custom_scan_rules.is_empty());
+    }
+
+    #[test]
+    fn deserializes_custom_scan_rule_defaults_and_actions() {
+        let config: WorkspacesConfig = serde_json::from_str(
+            r#"{
+                "workspaces": [],
+                "active_workspace_id": null,
+                "custom_scan_rules": [
+                    {
+                        "id": "ignore-rule",
+                        "label": "Ignore temp files",
+                        "pattern": "\\.tmp$",
+                        "action": "ignore"
+                    },
+                    {
+                        "id": "archive-rule",
+                        "label": "Archive logs",
+                        "pattern": "\\.log$",
+                        "action": "archive",
+                        "enabled": false
+                    }
+                ]
+            }"#,
+        )
+        .expect("config should deserialize");
+
+        let ignore_rule = &config.custom_scan_rules[0];
+        assert!(matches!(ignore_rule.action, CustomScanRuleAction::Ignore));
+        assert!(ignore_rule.enabled);
+
+        let archive_rule = &config.custom_scan_rules[1];
+        assert!(matches!(archive_rule.action, CustomScanRuleAction::Archive));
+        assert!(!archive_rule.enabled);
+    }
 }

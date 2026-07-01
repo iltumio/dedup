@@ -136,13 +136,30 @@ export interface Workspace {
 	stats: WorkspaceStats;
 }
 
+export interface CustomScanRule {
+	id: string;
+	label: string;
+	pattern: string;
+	action: ScanRuleAction;
+	enabled: boolean;
+}
+
 export interface WorkspacesConfig {
 	workspaces: Workspace[];
 	active_workspace_id: string | null;
+	custom_scan_rules: CustomScanRule[];
 }
 
 export async function listWorkspaces(): Promise<WorkspacesConfig> {
 	return invoke('list_workspaces');
+}
+
+export async function listCustomScanRules(): Promise<CustomScanRule[]> {
+	return invoke('list_custom_scan_rules');
+}
+
+export async function saveCustomScanRules(rules: CustomScanRule[]): Promise<CustomScanRule[]> {
+	return invoke('save_custom_scan_rules', { rules });
 }
 
 export async function createWorkspace(

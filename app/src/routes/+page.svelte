@@ -38,7 +38,11 @@
 	let currentView = $state<'files' | 'stats'>('files');
 
 	// ── Workspace state ──
-	let workspacesConfig = $state<WorkspacesConfig>({ workspaces: [], active_workspace_id: null });
+	let workspacesConfig = $state<WorkspacesConfig>({
+		workspaces: [],
+		active_workspace_id: null,
+		custom_scan_rules: []
+	});
 	let showWorkspaceDialog = $state(false);
 	let showCreateWorkspace = $state(false);
 	let newWsLabel = $state('');

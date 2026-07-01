@@ -7,9 +7,10 @@ use std::sync::{
 use dedup_core::{
     DirEntry, ExtensionStats, FileMetadata, ScanOptions, ScanProgress, ScanRule, ScanStats, Store,
 };
+use regex::Regex;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::workspace::{self, Workspace, WorkspacesConfig};
+use crate::workspace::{self, CustomScanRule, Workspace, WorkspacesConfig};
 
 /// Shared application state holding the current store and workspaces.
 pub struct AppState {
@@ -51,6 +52,26 @@ impl AppState {
     fn save_config(&self) -> Result<(), String> {
         let config = self.workspaces.lock().map_err(|e| e.to_string())?;
         config.save(&self.config_path)
+    }
+
+    fn update_config_transactionally<F>(&self, update: F) -> Result<WorkspacesConfig, String>
+    where
+        F: FnOnce(&mut WorkspacesConfig) -> Result<(), String>,
+    {
+        let mut config = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let previous = config.clone();
+
+        if let Err(e) = update(&mut config) {
+            *config = previous;
+            return Err(e);
+        }
+
+        if let Err(e) = config.save(&self.config_path) {
+            *config = previous;
+            return Err(e);
+        }
+
+        Ok(config.clone())
     }
 }
 
@@ -254,10 +275,58 @@ pub fn cancel_scan(state: State<'_, AppState>) -> Result<(), String> {
 
 // ── Workspace commands ──────────────────────────────────────────────
 
+fn validate_custom_scan_rule(rule: &CustomScanRule) -> Result<(), String> {
+    if rule.label.trim().is_empty() {
+        return Err("Rule label cannot be empty.".to_string());
+    }
+    if rule.pattern.trim().is_empty() {
+        return Err("Rule regex cannot be empty.".to_string());
+    }
+    Regex::new(&rule.pattern)
+        .map(|_| ())
+        .map_err(|e| format!("Invalid regex: {e}"))
+}
+
+fn merge_custom_scan_rules(config: &mut WorkspacesConfig, rules: Vec<CustomScanRule>) {
+    for rule in rules {
+        if let Some(existing) = config
+            .custom_scan_rules
+            .iter_mut()
+            .find(|existing| existing.id == rule.id)
+        {
+            *existing = rule;
+        } else {
+            config.custom_scan_rules.push(rule);
+        }
+    }
+}
+
 #[tauri::command]
 pub fn list_workspaces(state: State<'_, AppState>) -> Result<WorkspacesConfig, String> {
     let config = state.workspaces.lock().map_err(|e| e.to_string())?;
     Ok(config.clone())
+}
+
+#[tauri::command]
+pub fn list_custom_scan_rules(state: State<'_, AppState>) -> Result<Vec<CustomScanRule>, String> {
+    let config = state.workspaces.lock().map_err(|e| e.to_string())?;
+    Ok(config.custom_scan_rules.clone())
+}
+
+#[tauri::command]
+pub fn save_custom_scan_rules(
+    state: State<'_, AppState>,
+    rules: Vec<CustomScanRule>,
+) -> Result<Vec<CustomScanRule>, String> {
+    for rule in &rules {
+        validate_custom_scan_rule(rule)?;
+    }
+
+    let config = state.update_config_transactionally(|config| {
+        config.custom_scan_rules = rules;
+        Ok(())
+    })?;
+    Ok(config.custom_scan_rules)
 }
 
 #[tauri::command]
@@ -347,20 +416,21 @@ pub fn export_workspaces(state: State<'_, AppState>) -> Result<String, String> {
 #[tauri::command]
 pub fn import_workspaces(state: State<'_, AppState>, json: String) -> Result<WorkspacesConfig, String> {
     let imported: WorkspacesConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    for rule in &imported.custom_scan_rules {
+        validate_custom_scan_rule(rule)?;
+    }
 
-    {
-        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+    state.update_config_transactionally(|config| {
         // Merge: add workspaces that don't already exist (by ID)
         for ws in imported.workspaces {
             if !config.workspaces.iter().any(|existing| existing.id == ws.id) {
                 config.workspaces.push(ws);
             }
         }
-    }
 
-    state.save_config()?;
-    let config = state.workspaces.lock().map_err(|e| e.to_string())?;
-    Ok(config.clone())
+        merge_custom_scan_rules(config, imported.custom_scan_rules);
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -446,4 +516,73 @@ pub fn import_workspace(
 
  state.save_config()?;
  Ok(ws)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn custom_rule(id: &str, label: &str, pattern: &str) -> CustomScanRule {
+        CustomScanRule {
+            id: id.to_string(),
+            label: label.to_string(),
+            pattern: pattern.to_string(),
+            action: workspace::CustomScanRuleAction::Ignore,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn merge_custom_scan_rules_replaces_existing_rules_by_id_and_appends_new_rules() {
+        let mut config = WorkspacesConfig {
+            workspaces: Vec::new(),
+            active_workspace_id: None,
+            custom_scan_rules: vec![
+                custom_rule("keep", "Keep", "keep"),
+                custom_rule("replace", "Old", "old"),
+            ],
+        };
+
+        merge_custom_scan_rules(
+            &mut config,
+            vec![
+                custom_rule("replace", "New", "new"),
+                custom_rule("append", "Append", "append"),
+            ],
+        );
+
+        assert_eq!(config.custom_scan_rules.len(), 3);
+        assert_eq!(config.custom_scan_rules[0].id, "keep");
+        assert_eq!(config.custom_scan_rules[1].id, "replace");
+        assert_eq!(config.custom_scan_rules[1].label, "New");
+        assert_eq!(config.custom_scan_rules[1].pattern, "new");
+        assert_eq!(config.custom_scan_rules[2].id, "append");
+    }
+
+    #[test]
+    fn transactional_config_update_restores_previous_rules_when_save_fails() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "dedup-config-dir-{}",
+            workspace::generate_id()
+        ));
+        std::fs::create_dir_all(&config_dir).expect("test config directory should be created");
+
+        let state = AppState::new(config_dir.clone());
+        {
+            let mut config = state.workspaces.lock().expect("workspace lock should be available");
+            config.custom_scan_rules = vec![custom_rule("old", "Old", "old")];
+        }
+
+        let result = state.update_config_transactionally(|config| {
+            config.custom_scan_rules = vec![custom_rule("new", "New", "new")];
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        let config = state.workspaces.lock().expect("workspace lock should be available");
+        assert_eq!(config.custom_scan_rules.len(), 1);
+        assert_eq!(config.custom_scan_rules[0].id, "old");
+
+        std::fs::remove_dir_all(config_dir).expect("test config directory should be removed");
+    }
 }

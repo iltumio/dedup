@@ -26,6 +26,8 @@ fn main() {
             commands::cancel_scan,
             commands::open_file,
             commands::list_workspaces,
+            commands::list_custom_scan_rules,
+            commands::save_custom_scan_rules,
             commands::create_workspace,
             commands::switch_workspace,
             commands::delete_workspace,
