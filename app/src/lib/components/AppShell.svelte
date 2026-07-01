@@ -34,7 +34,7 @@
 </script>
 
 <div class="flex h-screen min-h-0 flex-col bg-base-100 text-base-content" data-theme="night">
-	<header class="flex h-12 shrink-0 items-center gap-3 border-b border-base-300 bg-base-200 px-3">
+	<header class="flex min-h-12 shrink-0 items-center gap-3 border-b border-base-300 bg-base-200 px-3">
 		<h1 class="text-sm font-bold">dedup</h1>
 
 		<div class="min-w-0">{@render workspaceControl?.()}</div>
@@ -66,7 +66,7 @@
 		</UiButton>
 	</header>
 
-	<main class="min-h-0 flex-1 overflow-hidden">
+	<main class="flex min-h-0 flex-1 overflow-hidden">
 		{@render children?.()}
 	</main>
 </div>
