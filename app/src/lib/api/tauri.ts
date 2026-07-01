@@ -24,6 +24,8 @@ export interface ScanStats {
 	duplicate_files: number;
 	total_original_bytes: number;
 	total_stored_bytes: number;
+	skipped_files: number;
+	errors_log_path: string | null;
 }
 
 export interface ScanProgress {
@@ -32,6 +34,7 @@ export interface ScanProgress {
 	bytes_processed: number;
 	bytes_stored: number;
 	duplicates_found: number;
+	skipped_files: number;
 	current_file: string;
 }
 
@@ -60,6 +63,10 @@ export async function scanDirectory(
 	targetPath: string
 ): Promise<ScanStats> {
 	return invoke('scan_directory', { source, targetPath });
+}
+
+export async function cancelScan(): Promise<void> {
+	return invoke('cancel_scan');
 }
 
 export async function findAllDuplicates(): Promise<[string, string[]][]> {

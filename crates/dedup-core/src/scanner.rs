@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use walkdir::WalkDir;
 
 use crate::cid as cid_util;
@@ -48,6 +48,32 @@ pub fn scan_directory_into<F>(
 ) -> Result<ScanStats>
 where
     F: Fn(&ScanProgress),
+{
+    scan_directory_into_with_cancellation(
+        source,
+        target_prefix,
+        store_root,
+        content_store,
+        metadata_db,
+        on_progress,
+        || false,
+    )
+}
+
+/// Scan a source directory into a target virtual path with cooperative
+/// cancellation between filesystem entries.
+pub fn scan_directory_into_with_cancellation<F, C>(
+    source: &Path,
+    target_prefix: &str,
+    store_root: &Path,
+    content_store: &ContentStore,
+    metadata_db: &MetadataDb,
+    on_progress: F,
+    should_cancel: C,
+) -> Result<ScanStats>
+where
+    F: Fn(&ScanProgress),
+    C: Fn() -> bool,
 {
     let source = source
         .canonicalize()
@@ -122,6 +148,10 @@ where
     }
 
     for entry in WalkDir::new(&source).follow_links(false) {
+        if should_cancel() {
+            bail!("scan cancelled");
+        }
+
         // Error reading the directory entry itself (e.g. permission denied on dir)
         let entry = match entry {
             Ok(e) => e,
@@ -482,5 +512,37 @@ mod tests {
         .unwrap();
 
         assert!(count.load(Ordering::Relaxed) >= 2);
+    }
+
+    #[test]
+    fn cancellable_scan_stops_after_cancellation_request() {
+        let (source_dir, store_dir, content_store, metadata_db) = setup_test_store();
+
+        fs::write(source_dir.path().join("a.txt"), b"aaa").unwrap();
+        fs::write(source_dir.path().join("b.txt"), b"bbb").unwrap();
+
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let cancelled = AtomicBool::new(false);
+        let progress_count = AtomicU64::new(0);
+
+        let result = scan_directory_into_with_cancellation(
+            source_dir.path(),
+            "/",
+            store_dir.path(),
+            &content_store,
+            &metadata_db,
+            |_p| {
+                progress_count.fetch_add(1, Ordering::Relaxed);
+                cancelled.store(true, Ordering::Relaxed);
+            },
+            || cancelled.load(Ordering::Relaxed),
+        );
+
+        assert!(result.unwrap_err().to_string().contains("scan cancelled"));
+        assert_eq!(progress_count.load(Ordering::Relaxed), 1);
+
+        let entries = metadata_db.list_dir("/").unwrap();
+        let files: Vec<_> = entries.iter().filter(|entry| !entry.is_dir).collect();
+        assert_eq!(files.len(), 1);
     }
 }

@@ -23,6 +23,7 @@ fn main() {
             commands::find_duplicates,
             commands::find_all_duplicates,
             commands::scan_directory,
+            commands::cancel_scan,
             commands::open_file,
             commands::list_workspaces,
             commands::create_workspace,
@@ -30,8 +31,8 @@ fn main() {
             commands::delete_workspace,
             commands::export_workspaces,
             commands::import_workspaces,
- commands::get_extension_stats,
- commands::import_workspace,
+            commands::get_extension_stats,
+            commands::import_workspace,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dedup app");

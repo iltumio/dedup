@@ -1,5 +1,8 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 use dedup_core::{DirEntry, ExtensionStats, FileMetadata, ScanProgress, ScanStats, Store};
 use tauri::{AppHandle, Emitter, State};
@@ -11,6 +14,7 @@ pub struct AppState {
     pub store: Mutex<Option<Store>>,
     pub store_path: Mutex<PathBuf>,
     pub workspaces: Mutex<WorkspacesConfig>,
+    pub scan_cancelled: Arc<AtomicBool>,
     pub config_path: PathBuf,
 }
 
@@ -26,6 +30,7 @@ impl AppState {
             store: Mutex::new(None),
             store_path: Mutex::new(initial_store_path),
             workspaces: Mutex::new(config),
+            scan_cancelled: Arc::new(AtomicBool::new(false)),
             config_path,
         }
     }
@@ -160,8 +165,11 @@ pub async fn scan_directory(
     source: String,
     target_path: String,
 ) -> Result<ScanStats, String> {
+    state.scan_cancelled.store(false, Ordering::Relaxed);
+
     let store_path_buf = state.store_path.lock().map_err(|e| e.to_string())?.clone();
     let source_path = PathBuf::from(&source);
+    let cancel_flag = Arc::clone(&state.scan_cancelled);
 
     // Take the store out of state (or open a fresh one).
     // redb locks the DB file, so we can't have two Store handles simultaneously.
@@ -176,12 +184,13 @@ pub async fn scan_directory(
     // Spawn the heavy scanning work on a blocking thread
     let result = tokio::task::spawn_blocking(move || {
         let stats = store
-            .scan_into(
+            .scan_into_with_cancellation(
                 &source_path,
                 &target_path,
                 move |progress: &ScanProgress| {
                     let _ = app.emit("scan-progress", progress.clone());
                 },
+                || cancel_flag.load(Ordering::Relaxed),
             )
             .map_err(|e| e.to_string());
         (store, stats)
@@ -190,13 +199,15 @@ pub async fn scan_directory(
     .map_err(|e| format!("Scan task failed: {e}"))?;
 
     let (store, stats) = result;
-    let stats = stats?;
 
     // Put the store back into state so subsequent queries work
     {
         let mut store_guard = state.store.lock().map_err(|e| e.to_string())?;
         *store_guard = Some(store);
     }
+    state.scan_cancelled.store(false, Ordering::Relaxed);
+
+    let stats = stats?;
 
     // Accumulate stats on the active workspace
     {
@@ -220,6 +231,12 @@ pub async fn scan_directory(
     state.save_config()?;
 
     Ok(stats)
+}
+
+#[tauri::command]
+pub fn cancel_scan(state: State<'_, AppState>) -> Result<(), String> {
+    state.scan_cancelled.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 // ── Workspace commands ──────────────────────────────────────────────

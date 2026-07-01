@@ -40,7 +40,7 @@
 		onSelect(fullPath, entry);
 	}
 
-	function handleScanInto(e: MouseEvent) {
+	function handleScanInto(e: MouseEvent | KeyboardEvent) {
 		e.stopPropagation();
 		onScanInto(fullPath);
 	}

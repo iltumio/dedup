@@ -68,6 +68,29 @@ impl Store {
         scanner::scan_directory_into(source, target_path, &self.root, &self.content, &self.metadata, on_progress)
     }
 
+    /// Scan a source directory into a target virtual path with cooperative cancellation.
+    pub fn scan_into_with_cancellation<F, C>(
+        &self,
+        source: &Path,
+        target_path: &str,
+        on_progress: F,
+        should_cancel: C,
+    ) -> Result<ScanStats>
+    where
+        F: Fn(&types::ScanProgress),
+        C: Fn() -> bool,
+    {
+        scanner::scan_directory_into_with_cancellation(
+            source,
+            target_path,
+            &self.root,
+            &self.content,
+            &self.metadata,
+            on_progress,
+            should_cancel,
+        )
+    }
+
     /// List entries in a virtual directory.
     pub fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
         self.metadata.list_dir(path)

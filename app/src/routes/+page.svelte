@@ -4,6 +4,7 @@
 	import StatsPage from '$lib/components/StatsPage.svelte';
 	import {
 		scanDirectory,
+		cancelScan,
 		onScanProgress,
 		formatSize,
 		listWorkspaces,
@@ -27,6 +28,7 @@
 	let scanSource = $state('');
 	let targetPath = $state('/');
 	let scanning = $state(false);
+	let cancelling = $state(false);
 	let scanResult = $state<ScanStats | null>(null);
 	let scanError = $state<string | null>(null);
 	let showScanDialog = $state(false);
@@ -206,6 +208,7 @@
 	async function handleScan() {
 		if (!scanSource.trim()) return;
 		scanning = true;
+		cancelling = false;
 		scanError = null;
 		progress = null;
 
@@ -222,10 +225,34 @@
 			// Refresh workspace stats
 			workspacesConfig = await listWorkspaces();
 		} catch (e) {
-			scanError = String(e);
+			const message = String(e);
+			if (cancelling && message.includes('scan cancelled')) {
+				showScanDialog = false;
+				progress = null;
+			} else {
+				scanError = message;
+			}
 		} finally {
 			unlisten?.();
 			scanning = false;
+			cancelling = false;
+		}
+	}
+
+	async function handleCancelScan() {
+		if (!scanning) {
+			showScanDialog = false;
+			return;
+		}
+
+		cancelling = true;
+		scanError = null;
+
+		try {
+			await cancelScan();
+		} catch (e) {
+			scanError = String(e);
+			cancelling = false;
 		}
 	}
 
@@ -254,7 +281,7 @@
 			{/if}
 		</button>
 
-		<button class="scan-btn" onclick={() => openScanDialog()} disabled={!hasWorkspace}>
+		<button class="scan-btn" onclick={() => openScanDialog()} disabled={!hasWorkspace || scanning}>
 			Scan Directory
 		</button>
 
@@ -351,8 +378,8 @@
 				{/if}
 
 				<div class="dialog-actions">
-					<button class="cancel" onclick={() => (showScanDialog = false)} disabled={scanning}>
-						Cancel
+					<button class="cancel" onclick={handleCancelScan} disabled={cancelling}>
+						{scanning ? (cancelling ? 'Cancelling...' : 'Cancel Scan') : 'Cancel'}
 					</button>
 					<button class="primary" onclick={handleScan} disabled={scanning}>
 						{scanning ? 'Scanning...' : 'Start Scan'}
