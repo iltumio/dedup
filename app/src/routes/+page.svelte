@@ -523,30 +523,32 @@
 		onImportStorePathChange={(value) => (importWsStorePath = value)}
 	/>
 
-	{#if !hasWorkspace}
-		<UiEmptyState title="Welcome to dedup" message="Create or import a workspace to start scanning.">
-			{#snippet actions()}
-				<UiButton variant="primary" onclick={openWorkspaceManager}>Manage Workspaces</UiButton>
-			{/snippet}
-		</UiEmptyState>
-	{:else if currentView === 'stats'}
-		<div class="h-full overflow-auto p-3">
-			<StatsPage />
-		</div>
-	{:else}
-		<div class="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[20rem_minmax(0,1fr)]">
-			<aside class="min-h-0 border-r border-base-300 bg-base-100">
-				{#key treeRefreshKey}
-					<FileTree {selectedPath} onSelect={handleSelect} onScanInto={openScanDialog} />
-				{/key}
-			</aside>
-			<section class="min-h-0 overflow-hidden bg-base-100">
-				{#if selectedPath && selectedEntry}
-					<FileDetails path={selectedPath} entry={selectedEntry} />
-				{:else}
-					<UiEmptyState title="Select a file" message="Choose a stored path to inspect metadata and duplicate locations." />
-				{/if}
-			</section>
-		</div>
-	{/if}
+	<div class="min-h-0 flex-1 overflow-hidden">
+		{#if !hasWorkspace}
+			<UiEmptyState title="Welcome to dedup" message="Create or import a workspace to start scanning.">
+				{#snippet actions()}
+					<UiButton variant="primary" onclick={openWorkspaceManager}>Manage Workspaces</UiButton>
+				{/snippet}
+			</UiEmptyState>
+		{:else if currentView === 'stats'}
+			<div class="h-full overflow-auto p-3">
+				<StatsPage />
+			</div>
+		{:else}
+			<div class="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[20rem_minmax(0,1fr)]">
+				<aside class="min-h-0 border-r border-base-300 bg-base-100">
+					{#key treeRefreshKey}
+						<FileTree {selectedPath} onSelect={handleSelect} onScanInto={openScanDialog} />
+					{/key}
+				</aside>
+				<section class="min-h-0 overflow-hidden bg-base-100">
+					{#if selectedPath && selectedEntry}
+						<FileDetails path={selectedPath} entry={selectedEntry} />
+					{:else}
+						<UiEmptyState title="Select a file" message="Choose a stored path to inspect metadata and duplicate locations." />
+					{/if}
+				</section>
+			</div>
+		{/if}
+	</div>
 </AppShell>
