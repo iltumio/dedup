@@ -4,7 +4,9 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use dedup_core::{DirEntry, ExtensionStats, FileMetadata, ScanProgress, ScanStats, Store};
+use dedup_core::{
+    DirEntry, ExtensionStats, FileMetadata, ScanOptions, ScanProgress, ScanStats, Store,
+};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::workspace::{self, Workspace, WorkspacesConfig};
@@ -164,6 +166,7 @@ pub async fn scan_directory(
     state: State<'_, AppState>,
     source: String,
     target_path: String,
+    bundle_git_dirs: bool,
 ) -> Result<ScanStats, String> {
     state.scan_cancelled.store(false, Ordering::Relaxed);
 
@@ -184,9 +187,10 @@ pub async fn scan_directory(
     // Spawn the heavy scanning work on a blocking thread
     let result = tokio::task::spawn_blocking(move || {
         let stats = store
-            .scan_into_with_cancellation(
+            .scan_into_with_options_and_cancellation(
                 &source_path,
                 &target_path,
+                ScanOptions { bundle_git_dirs },
                 move |progress: &ScanProgress| {
                     let _ = app.emit("scan-progress", progress.clone());
                 },

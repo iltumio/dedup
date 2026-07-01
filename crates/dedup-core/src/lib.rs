@@ -70,6 +70,28 @@ impl Store {
         scanner::scan_directory_into(source, target_path, &self.root, &self.content, &self.metadata, on_progress)
     }
 
+    /// Scan a source directory into a target virtual path with explicit options.
+    pub fn scan_into_with_options<F>(
+        &self,
+        source: &Path,
+        target_path: &str,
+        options: ScanOptions,
+        on_progress: F,
+    ) -> Result<ScanStats>
+    where
+        F: Fn(&types::ScanProgress),
+    {
+        scanner::scan_directory_into_with_options(
+            source,
+            target_path,
+            &self.root,
+            &self.content,
+            &self.metadata,
+            options,
+            on_progress,
+        )
+    }
+
     /// Scan a source directory into a target virtual path with cooperative cancellation.
     pub fn scan_into_with_cancellation<F, C>(
         &self,
@@ -82,12 +104,35 @@ impl Store {
         F: Fn(&types::ScanProgress),
         C: Fn() -> bool,
     {
-        scanner::scan_directory_into_with_cancellation(
+        self.scan_into_with_options_and_cancellation(
+            source,
+            target_path,
+            ScanOptions::default(),
+            on_progress,
+            should_cancel,
+        )
+    }
+
+    /// Scan a source directory into a target virtual path with options and cooperative cancellation.
+    pub fn scan_into_with_options_and_cancellation<F, C>(
+        &self,
+        source: &Path,
+        target_path: &str,
+        options: ScanOptions,
+        on_progress: F,
+        should_cancel: C,
+    ) -> Result<ScanStats>
+    where
+        F: Fn(&types::ScanProgress),
+        C: Fn() -> bool,
+    {
+        scanner::scan_directory_into_with_options_and_cancellation(
             source,
             target_path,
             &self.root,
             &self.content,
             &self.metadata,
+            options,
             on_progress,
             should_cancel,
         )

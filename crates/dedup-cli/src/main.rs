@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use dedup_core::Store;
+use dedup_core::{ScanOptions, Store};
 
 #[derive(Parser)]
 #[command(name = "dedup", about = "Content-addressed file deduplication tool")]
@@ -29,6 +29,10 @@ enum Commands {
         /// Defaults to "/" (root). Existing content is preserved.
         #[arg(short, long, default_value = "/")]
         target: String,
+
+        /// Bundle each .git directory into one .git.tar archive blob.
+        #[arg(long)]
+        bundle_git_dirs: bool,
     },
 
     /// List contents of a virtual directory in the store.
@@ -78,7 +82,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan { source, store, target } => cmd_scan(&source, &store, &target),
+        Commands::Scan {
+            source,
+            store,
+            target,
+            bundle_git_dirs,
+        } => cmd_scan(&source, &store, &target, bundle_git_dirs),
         Commands::Ls { path, store } => cmd_ls(&path, &store),
         Commands::Info { path, store } => cmd_info(&path, &store),
         Commands::Duplicates { store } => cmd_duplicates(&store),
@@ -90,10 +99,13 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_scan(source: &PathBuf, store_path: &PathBuf, target: &str) -> Result<()> {
+fn cmd_scan(source: &PathBuf, store_path: &PathBuf, target: &str, bundle_git_dirs: bool) -> Result<()> {
     println!("Scanning: {}", source.display());
     println!("Store:    {}", store_path.display());
     println!("Target:   {target}");
+    if bundle_git_dirs {
+        println!("Git dirs: bundled as .git.tar");
+    }
     println!();
 
     let store = Store::open(store_path).context("failed to open store")?;
@@ -101,20 +113,27 @@ fn cmd_scan(source: &PathBuf, store_path: &PathBuf, target: &str) -> Result<()> 
     let last_file = std::sync::Mutex::new(String::new());
     let files_count = AtomicU64::new(0);
 
-    let stats = store.scan_into(source, target, |progress| {
-        files_count.store(progress.files_processed, Ordering::Relaxed);
-        if let Ok(mut lf) = last_file.lock() {
-            *lf = progress.current_file.clone();
-        }
-        // Print progress every 100 files
-        if progress.files_processed % 100 == 0 || progress.files_processed == 1 {
-            eprint!(
-                "\r  Processed {} files ({})...",
-                progress.files_processed,
-                format_size(progress.bytes_processed)
-            );
-        }
-    }).context("scan failed")?;
+    let stats = store
+        .scan_into_with_options(
+            source,
+            target,
+            ScanOptions { bundle_git_dirs },
+            |progress| {
+                files_count.store(progress.files_processed, Ordering::Relaxed);
+                if let Ok(mut lf) = last_file.lock() {
+                    *lf = progress.current_file.clone();
+                }
+                // Print progress every 100 files
+                if progress.files_processed % 100 == 0 || progress.files_processed == 1 {
+                    eprint!(
+                        "\r  Processed {} files ({})...",
+                        progress.files_processed,
+                        format_size(progress.bytes_processed)
+                    );
+                }
+            },
+        )
+        .context("scan failed")?;
 
     eprintln!("\r                                                    ");
     println!("Scan complete!");
