@@ -4,6 +4,7 @@
 	import StatsPage from '$lib/components/StatsPage.svelte';
 	import AppShell from '$lib/components/AppShell.svelte';
 	import WorkspaceManagerDialog from '$lib/components/workspace/WorkspaceManagerDialog.svelte';
+	import ScanDialog from '$lib/components/scan/ScanDialog.svelte';
 	import {
 		scanDirectory,
 		cancelScan,
@@ -286,6 +287,13 @@
 		showScanDialog = true;
 	}
 
+	function handlePresetChange(id: string, checked: boolean) {
+		if (id === 'git') bundleGitDirs = checked;
+		if (id === 'rust') ignoreRustTarget = checked;
+		if (id === 'node') ignoreNodeModules = checked;
+		if (id === 'python') ignorePythonVenv = checked;
+	}
+
 	function buildScanRules(): ScanRule[] {
 		const rules: ScanRule[] = [];
 		if (bundleGitDirs) {
@@ -456,169 +464,37 @@
 	{/snippet}
 
 	<!-- Scan Dialog -->
-	{#if showScanDialog}
-		<div class="dialog-overlay" role="dialog" aria-modal="true" aria-labelledby="scan-dialog-title">
-			<div class="dialog-content">
-				<h2 id="scan-dialog-title">Scan Directory</h2>
-				<label>
-					<span>Source directory</span>
-					<input
-						type="text"
-						bind:value={scanSource}
-						placeholder="/path/to/directory"
-						disabled={scanning}
-					/>
-				</label>
-				<label>
-					<span>Place content under (virtual path)</span>
-					<input
-						type="text"
-						bind:value={targetPath}
-						placeholder="/"
-						disabled={scanning}
-					/>
-					<span class="hint">Use "/" for root, or e.g. "/photos/vacation" to nest</span>
-				</label>
-				<div class="scan-rules">
-					<label class="checkbox-row">
-						<input type="checkbox" bind:checked={bundleGitDirs} disabled={scanning} />
-						<span>Archive .git directories</span>
-					</label>
-					<label class="checkbox-row">
-						<input type="checkbox" bind:checked={ignoreRustTarget} disabled={scanning} />
-						<span>Ignore Rust target directories</span>
-					</label>
-					<label class="checkbox-row">
-						<input type="checkbox" bind:checked={ignoreNodeModules} disabled={scanning} />
-						<span>Ignore node_modules directories</span>
-					</label>
-					<label class="checkbox-row">
-						<input type="checkbox" bind:checked={ignorePythonVenv} disabled={scanning} />
-						<span>Ignore Python virtual environments</span>
-					</label>
-				</div>
-
-				{#if customScanRules.length > 0}
-					<div class="scan-rules">
-						{#each customScanRules as rule (rule.id)}
-							<div class="custom-rule-row">
-								<label class="checkbox-row custom-rule-label">
-									<input
-										type="checkbox"
-										checked={activeCustomRuleIds.includes(rule.id)}
-										onchange={(event) =>
-											toggleCustomRule(rule.id, event.currentTarget.checked)}
-										disabled={scanning || savingCustomRules}
-									/>
-									<span>{rule.label}</span>
-								</label>
-								<button
-									class="rule-remove"
-									onclick={() => handleRemoveCustomRule(rule.id)}
-									disabled={scanning || savingCustomRules}
-								>
-									Remove
-								</button>
-							</div>
-						{/each}
-					</div>
-				{/if}
-
-				<div class="custom-rule-editor">
-					<input
-						type="text"
-						bind:value={newRuleLabel}
-						aria-label="Custom rule label"
-						placeholder="Rule label"
-						disabled={scanning || savingCustomRules}
-					/>
-					<input
-						type="text"
-						bind:value={newRulePattern}
-						aria-label="Custom rule regex"
-						placeholder="Regex, e.g. (^|/)dist$"
-						disabled={scanning || savingCustomRules}
-					/>
-					<select
-						bind:value={newRuleAction}
-						aria-label="Custom rule action"
-						disabled={scanning || savingCustomRules}
-					>
-						<option value="ignore">Ignore</option>
-						<option value="archive">Archive</option>
-					</select>
-					<button
-						class="secondary"
-						onclick={handleAddCustomRule}
-						disabled={scanning || savingCustomRules}
-					>
-						Add Rule
-					</button>
-				</div>
-
-				{#if customRulesError}
-					<div class="error">{customRulesError}</div>
-				{/if}
-
-				{#if scanning && progress}
-					<div class="progress-section">
-						<div class="progress-bar-track">
-							<div class="progress-bar-fill" style="width: 100%"></div>
-						</div>
-						<div class="progress-stats">
-							<div class="stat-row">
-								<span class="stat-label">Files</span>
-								<span class="stat-value">{progress.files_processed}</span>
-							</div>
-							<div class="stat-row">
-								<span class="stat-label">Processed</span>
-								<span class="stat-value">{formatSize(progress.bytes_processed)}</span>
-							</div>
-							<div class="stat-row">
-								<span class="stat-label">Stored</span>
-								<span class="stat-value">{formatSize(progress.bytes_stored)}</span>
-							</div>
-							<div class="stat-row">
-								<span class="stat-label">Duplicates</span>
-								<span class="stat-value highlight">{progress.duplicates_found}</span>
-							</div>
-							{#if progress.bytes_processed > 0}
-								<div class="stat-row">
-									<span class="stat-label">Space saved</span>
-									<span class="stat-value saved">
-										{formatSize(progress.bytes_processed - progress.bytes_stored)}
-									</span>
-								</div>
-							{/if}
-						</div>
-						<div class="current-file" title={progress.current_file}>
-							{progress.current_file}
-						</div>
-					</div>
-				{:else if scanning}
-					<div class="progress-section">
-						<div class="progress-bar-track">
-							<div class="progress-bar-fill indeterminate"></div>
-						</div>
-						<div class="current-file">Starting scan...</div>
-					</div>
-				{/if}
-
-				{#if scanError}
-					<div class="error">{scanError}</div>
-				{/if}
-
-				<div class="dialog-actions">
-					<button class="cancel" onclick={handleCancelScan} disabled={cancelling}>
-						{scanning ? (cancelling ? 'Cancelling...' : 'Cancel Scan') : 'Cancel'}
-					</button>
-					<button class="primary" onclick={handleScan} disabled={scanning || savingCustomRules}>
-						{scanning ? 'Scanning...' : 'Start Scan'}
-					</button>
-				</div>
-			</div>
-		</div>
-	{/if}
+	<ScanDialog
+		open={showScanDialog}
+		{scanning}
+		{cancelling}
+		{savingCustomRules}
+		source={scanSource}
+		{targetPath}
+		{bundleGitDirs}
+		{ignoreRustTarget}
+		{ignoreNodeModules}
+		{ignorePythonVenv}
+		customRules={customScanRules}
+		{activeCustomRuleIds}
+		{newRuleLabel}
+		{newRulePattern}
+		{newRuleAction}
+		{customRulesError}
+		{scanError}
+		{progress}
+		onCloseOrCancel={handleCancelScan}
+		onScan={handleScan}
+		onSourceChange={(value) => (scanSource = value)}
+		onTargetPathChange={(value) => (targetPath = value)}
+		onPresetChange={handlePresetChange}
+		onToggleCustomRule={toggleCustomRule}
+		onRemoveCustomRule={handleRemoveCustomRule}
+		onNewRuleLabelChange={(value) => (newRuleLabel = value)}
+		onNewRulePatternChange={(value) => (newRulePattern = value)}
+		onNewRuleActionChange={(value) => (newRuleAction = value)}
+		onAddCustomRule={handleAddCustomRule}
+	/>
 
 	<WorkspaceManagerDialog
 		open={showWorkspaceDialog}
@@ -731,258 +607,6 @@
 		font-size: 14px;
 	}
 
-	/* Dialog */
-	.dialog-overlay {
-		position: fixed;
-		inset: 0;
-		background: rgba(0, 0, 0, 0.6);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		z-index: 100;
-	}
-
-	.dialog-content {
-		background: var(--app-bg-secondary);
-		border: 1px solid var(--app-border-color);
-		border-radius: 12px;
-		padding: 24px;
-		width: min(480px, calc(100vw - 32px));
-		max-height: calc(100vh - 32px);
-		overflow-y: auto;
-		display: flex;
-		flex-direction: column;
-		gap: 14px;
-	}
-
-	.dialog-content h2 {
-		font-size: 16px;
-		font-weight: 600;
-	}
-
-	.dialog-content label {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		font-size: 13px;
-	}
-
-	.dialog-content label span {
-		color: var(--app-text-muted);
-	}
-
-	.hint {
-		font-size: 11px !important;
-		opacity: 0.6;
-	}
-
-	.dialog-content input {
-		background: var(--app-bg);
-		border: 1px solid var(--app-border-color);
-		border-radius: 6px;
-		padding: 8px 12px;
-		font-size: 13px;
-		font-family: var(--app-font-mono);
-	}
-
-	.dialog-content input:focus {
-		outline: none;
-		border-color: var(--app-accent-light);
-	}
-
-	.dialog-content input:disabled {
-		opacity: 0.5;
-	}
-
-	.checkbox-row {
-		flex-direction: row !important;
-		align-items: center;
-		gap: 8px !important;
-	}
-
-	.checkbox-row input {
-		width: 14px;
-		height: 14px;
-		padding: 0;
-		margin: 0;
-	}
-
-	.checkbox-row span {
-		min-width: 0;
-		overflow-wrap: anywhere;
-	}
-
-	.scan-rules {
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-		padding: 8px 0;
-	}
-
-	.custom-rule-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-
-	.custom-rule-label {
-		flex: 1;
-		min-width: 0;
-	}
-
-	.rule-remove {
-		margin-left: auto;
-		padding: 4px 8px;
-		background: var(--app-bg);
-		border: 1px solid var(--app-border-color);
-		border-radius: 6px;
-		color: var(--app-text-muted);
-		font-size: 12px;
-		flex-shrink: 0;
-	}
-
-	.rule-remove:hover:not(:disabled) {
-		border-color: var(--app-duplicate);
-		color: var(--app-duplicate);
-	}
-
-	.custom-rule-editor {
-		display: grid;
-		grid-template-columns: 1fr 1fr 96px auto;
-		gap: 8px;
-		align-items: center;
-	}
-
-	.custom-rule-editor input {
-		min-width: 0;
-	}
-
-	.custom-rule-editor select {
-		background: var(--app-bg);
-		border: 1px solid var(--app-border-color);
-		border-radius: 6px;
-		padding: 8px 10px;
-		font-size: 13px;
-	}
-
-	.custom-rule-editor button {
-		white-space: nowrap;
-	}
-
-	@media (max-width: 560px) {
-		.custom-rule-editor {
-			grid-template-columns: 1fr;
-		}
-
-		.custom-rule-editor button {
-			width: 100%;
-		}
-	}
-
-	/* Progress */
-	.progress-section {
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-		padding: 12px;
-		background: var(--app-bg);
-		border-radius: 8px;
-		border: 1px solid var(--app-border-color);
-	}
-
-	.progress-bar-track {
-		height: 6px;
-		background: var(--app-border-color);
-		border-radius: 3px;
-		overflow: hidden;
-	}
-
-	.progress-bar-fill {
-		height: 100%;
-		background: var(--app-accent-light);
-		border-radius: 3px;
-		transition: width 0.3s;
-	}
-
-	.progress-bar-fill.indeterminate {
-		width: 30% !important;
-		animation: indeterminate 1.5s infinite ease-in-out;
-	}
-
-	@keyframes indeterminate {
-		0% { transform: translateX(-100%); }
-		100% { transform: translateX(400%); }
-	}
-
-	.progress-stats {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 4px 16px;
-	}
-
-	.stat-row {
-		display: flex;
-		justify-content: space-between;
-		font-size: 12px;
-	}
-
-	.stat-label {
-		color: var(--app-text-muted);
-	}
-
-	.stat-value {
-		font-family: var(--app-font-mono);
-		font-size: 11px;
-	}
-
-	.stat-value.highlight {
-		color: var(--app-duplicate);
-		font-weight: 600;
-	}
-
-	.stat-value.saved {
-		color: var(--app-success);
-		font-weight: 600;
-	}
-
-	.current-file {
-		font-size: 11px;
-		color: var(--app-text-muted);
-		font-family: var(--app-font-mono);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.dialog-actions {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-
-	.dialog-actions button {
-		padding: 8px 16px;
-		border-radius: 6px;
-		font-size: 13px;
-		font-weight: 500;
-	}
-
-	.cancel {
-		background: var(--app-bg);
-		border: 1px solid var(--app-border-color);
-	}
-
-	.secondary {
-		background: var(--app-bg);
-		border: 1px solid var(--app-border-color);
-		color: var(--app-text-muted);
-	}
-
-	.secondary:hover {
-		border-color: var(--app-accent);
-		color: var(--app-text);
-	}
-
 	.primary {
 		background: var(--app-accent);
 	}
@@ -994,10 +618,5 @@
 	.primary:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
-	}
-
-	.error {
-		color: var(--app-duplicate);
-		font-size: 13px;
 	}
 </style>
