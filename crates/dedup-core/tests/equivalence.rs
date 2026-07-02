@@ -492,3 +492,54 @@ fn cancellation_does_not_hang() {
 
     assert!(result.is_err(), "cancelled scan unexpectedly succeeded");
 }
+
+#[test]
+fn incremental_rescan_many_files_mixed_changes() {
+    let source_dir = TempDir::new().unwrap();
+    for dir_index in 0..12 {
+        let dir = source_dir.path().join(format!("bulk/dir{dir_index:02}"));
+        create_dir(&dir);
+        for file_index in 0..40 {
+            write_file(
+                dir.join(format!("f{file_index:02}.txt")),
+                format!("content {dir_index} {file_index}"),
+            );
+        }
+    }
+
+    let serial_store_dir = TempDir::new().unwrap();
+    let parallel_store_dir = TempDir::new().unwrap();
+    let serial_store = Store::open(serial_store_dir.path()).unwrap();
+    let parallel_store = Store::open(parallel_store_dir.path()).unwrap();
+    let mut base_options = ScanOptions::default();
+
+    scan_with_parallelism(&serial_store, source_dir.path(), &base_options, 1);
+    scan_with_parallelism(&parallel_store, source_dir.path(), &base_options, 8);
+    thread::sleep(Duration::from_secs(1));
+
+    for dir_index in 0..12 {
+        let dir = source_dir.path().join(format!("bulk/dir{dir_index:02}"));
+        write_file(dir.join("f00.txt"), format!("changed {dir_index}"));
+        write_file(dir.join("new.txt"), format!("new {dir_index}"));
+        fs::remove_file(dir.join("f01.txt")).unwrap();
+    }
+    base_options.prune_deleted = true;
+
+    let serial_stats = scan_with_parallelism(&serial_store, source_dir.path(), &base_options, 1);
+    let parallel_stats =
+        scan_with_parallelism(&parallel_store, source_dir.path(), &base_options, 8);
+
+    assert_stores_equivalent(
+        &serial_store,
+        serial_store_dir.path(),
+        &parallel_store,
+        parallel_store_dir.path(),
+    );
+    assert_stats_equivalent(&serial_stats, &parallel_stats);
+    // 480 originals - 12 modified - 12 deleted = 456 untouched files must be
+    // detected as unchanged by both paths.
+    assert_eq!(serial_stats.unchanged_files, 456);
+    assert_eq!(parallel_stats.unchanged_files, 456);
+    assert_eq!(serial_stats.pruned_entries, 12);
+    assert_eq!(parallel_stats.pruned_entries, 12);
+}

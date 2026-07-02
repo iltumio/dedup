@@ -919,148 +919,175 @@ fn dispatch_parallel_scan(context: ParallelDispatchContext<'_>) -> Result<()> {
                 continue;
             };
 
-            let matched_rule = if rel_str.is_empty() {
-                None
-            } else {
-                matching_rule(rules.as_ref(), &rel_str)
-            };
-
-            if let Some(rule) = matched_rule {
-                match rule.action {
-                    ScanRuleAction::Ignore => {
-                        if !send_write_op(&sender, &cancel_flag, WriteOp::Skipped { virtual_path })
-                        {
-                            break;
-                        }
-                        continue;
-                    }
-                    ScanRuleAction::Archive => {
-                        if !entry_file_type.is_dir() {
-                            if !send_write_op(
-                                &sender,
-                                &cancel_flag,
-                                WriteOp::Skipped { virtual_path },
-                            ) {
-                                break;
-                            }
-                            continue;
-                        }
-
-                        let archive_virtual_path = format!("{virtual_path}.tar");
-                        let root_name = archive_root_name(&abs_path);
-                        let archive_path = abs_path;
-                        let task_sender = sender.clone();
-                        let task_cancel_flag = Arc::clone(&cancel_flag);
-                        scope.spawn(move |_| {
-                            store_archive_write_op(ArchiveTaskContext {
-                                archive_virtual_path,
-                                root_name,
-                                abs_path: archive_path,
-                                content_store,
-                                sender: task_sender,
-                                cancel_flag: task_cancel_flag,
-                            });
-                        });
-                        continue;
-                    }
-                }
-            }
-
-            if has_sibling_archive_source_for_rule(source, &rel_str, rules.as_ref()) {
-                let message =
-                    "virtual path collision: .tar is reserved for archived directory".to_string();
-                if !send_write_op(
-                    &sender,
-                    &cancel_flag,
-                    WriteOp::Error {
-                        path: virtual_path,
-                        message,
-                        still_exists: true,
-                    },
-                ) {
-                    break;
-                }
-                continue;
-            }
-
-            let fs_meta = match fs::metadata(&abs_path) {
-                Ok(metadata) => metadata,
-                Err(err) => {
-                    let message = format!("failed to read metadata: {err}");
-                    if !send_write_op(
-                        &sender,
-                        &cancel_flag,
-                        WriteOp::Error {
-                            path: virtual_path,
-                            message,
-                            still_exists: true,
-                        },
-                    ) {
-                        break;
-                    }
-                    continue;
-                }
-            };
-
-            if fs_meta.is_dir() {
-                let modified = extract_mtime(&fs_meta);
-                let dir_meta = DirMetadata {
-                    child_count: 0,
-                    modified,
-                };
-                if !send_write_op(
-                    &sender,
-                    &cancel_flag,
-                    WriteOp::Dir {
-                        virtual_path,
-                        meta: dir_meta,
-                    },
-                ) {
-                    break;
-                }
-            } else if fs_meta.is_file() {
-                let modified = extract_mtime(&fs_meta);
-                if let Some(existing) = unchanged_file_metadata(
-                    metadata_db,
+            // Plan each entry on the worker pool so stat, rule matching, and
+            // change detection run concurrently instead of serially here.
+            let task_rules = Arc::clone(&rules);
+            let task_sender = sender.clone();
+            let task_cancel_flag = Arc::clone(&cancel_flag);
+            scope.spawn(move |_| {
+                plan_walk_entry(PlanTaskContext {
+                    source,
                     content_store,
-                    &virtual_path,
-                    fs_meta.len(),
-                    modified,
-                ) {
-                    if !send_write_op(
-                        &sender,
-                        &cancel_flag,
-                        WriteOp::Unchanged {
-                            virtual_path,
-                            original_size: existing.original_size,
-                        },
-                    ) {
-                        break;
-                    }
-                    continue;
-                }
-
-                let created = extract_ctime(&fs_meta);
-                let permissions = metadata_permissions(&fs_meta);
-                let task_sender = sender.clone();
-                let task_cancel_flag = Arc::clone(&cancel_flag);
-                scope.spawn(move |_| {
-                    store_file_write_op(FileTaskContext {
-                        virtual_path,
-                        abs_path,
-                        modified,
-                        created,
-                        permissions,
-                        content_store,
-                        sender: task_sender,
-                        cancel_flag: task_cancel_flag,
-                    });
+                    metadata_db,
+                    rules: task_rules,
+                    rel_str,
+                    virtual_path,
+                    abs_path,
+                    entry_is_dir: entry_file_type.is_dir(),
+                    sender: task_sender,
+                    cancel_flag: task_cancel_flag,
                 });
-            }
+            });
         }
     });
 
     Ok(())
+}
+
+struct PlanTaskContext<'a> {
+    source: &'a Path,
+    content_store: &'a ContentStore,
+    metadata_db: &'a MetadataDb,
+    rules: Arc<[CompiledScanRule]>,
+    rel_str: String,
+    virtual_path: String,
+    abs_path: PathBuf,
+    entry_is_dir: bool,
+    sender: mpsc::Sender<WriteOp>,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+/// Per-entry planning stage, run on a worker thread: rule matching, stat,
+/// change detection, and (for changed files / archives) the store work itself.
+fn plan_walk_entry(context: PlanTaskContext<'_>) {
+    let PlanTaskContext {
+        source,
+        content_store,
+        metadata_db,
+        rules,
+        rel_str,
+        virtual_path,
+        abs_path,
+        entry_is_dir,
+        sender,
+        cancel_flag,
+    } = context;
+
+    if cancel_flag.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let matched_rule = if rel_str.is_empty() {
+        None
+    } else {
+        matching_rule(rules.as_ref(), &rel_str)
+    };
+
+    if let Some(rule) = matched_rule {
+        match rule.action {
+            ScanRuleAction::Ignore => {
+                send_write_op(&sender, &cancel_flag, WriteOp::Skipped { virtual_path });
+                return;
+            }
+            ScanRuleAction::Archive => {
+                if !entry_is_dir {
+                    send_write_op(&sender, &cancel_flag, WriteOp::Skipped { virtual_path });
+                    return;
+                }
+
+                let archive_virtual_path = format!("{virtual_path}.tar");
+                let root_name = archive_root_name(&abs_path);
+                store_archive_write_op(ArchiveTaskContext {
+                    archive_virtual_path,
+                    root_name,
+                    abs_path,
+                    content_store,
+                    sender,
+                    cancel_flag,
+                });
+                return;
+            }
+        }
+    }
+
+    if has_sibling_archive_source_for_rule(source, &rel_str, rules.as_ref()) {
+        let message = "virtual path collision: .tar is reserved for archived directory".to_string();
+        send_write_op(
+            &sender,
+            &cancel_flag,
+            WriteOp::Error {
+                path: virtual_path,
+                message,
+                still_exists: true,
+            },
+        );
+        return;
+    }
+
+    let fs_meta = match fs::metadata(&abs_path) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            let message = format!("failed to read metadata: {err}");
+            send_write_op(
+                &sender,
+                &cancel_flag,
+                WriteOp::Error {
+                    path: virtual_path,
+                    message,
+                    still_exists: true,
+                },
+            );
+            return;
+        }
+    };
+
+    if fs_meta.is_dir() {
+        let modified = extract_mtime(&fs_meta);
+        let dir_meta = DirMetadata {
+            child_count: 0,
+            modified,
+        };
+        send_write_op(
+            &sender,
+            &cancel_flag,
+            WriteOp::Dir {
+                virtual_path,
+                meta: dir_meta,
+            },
+        );
+    } else if fs_meta.is_file() {
+        let modified = extract_mtime(&fs_meta);
+        if let Some(existing) = unchanged_file_metadata(
+            metadata_db,
+            content_store,
+            &virtual_path,
+            fs_meta.len(),
+            modified,
+        ) {
+            send_write_op(
+                &sender,
+                &cancel_flag,
+                WriteOp::Unchanged {
+                    virtual_path,
+                    original_size: existing.original_size,
+                },
+            );
+            return;
+        }
+
+        let created = extract_ctime(&fs_meta);
+        let permissions = metadata_permissions(&fs_meta);
+        store_file_write_op(FileTaskContext {
+            virtual_path,
+            abs_path,
+            modified,
+            created,
+            permissions,
+            content_store,
+            sender,
+            cancel_flag,
+        });
+    }
 }
 
 fn consume_parallel_write_ops<F, C>(
