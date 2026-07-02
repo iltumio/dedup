@@ -217,6 +217,8 @@ pub async fn scan_directory(
                 ScanOptions {
                     bundle_git_dirs: false,
                     rules,
+                    prune_deleted: false,
+                    parallelism: None,
                 },
                 move |progress: &ScanProgress| {
                     let _ = app.emit("scan-progress", progress.clone());

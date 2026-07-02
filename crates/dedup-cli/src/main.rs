@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
@@ -33,6 +33,10 @@ enum Commands {
         /// Bundle each .git directory into one .git.tar archive blob.
         #[arg(long)]
         bundle_git_dirs: bool,
+
+        /// Remove store entries under the target that no longer exist at the source.
+        #[arg(long)]
+        prune: bool,
 
         /// Ignore directories named target.
         #[arg(long)]
@@ -107,6 +111,7 @@ fn main() -> Result<()> {
             store,
             target,
             bundle_git_dirs,
+            prune,
             ignore_rust_target,
             ignore_node_modules,
             ignore_python_venv,
@@ -124,6 +129,7 @@ fn main() -> Result<()> {
             },
             &ignore_regexes,
             &archive_regexes,
+            prune,
         ),
         Commands::Ls { path, store } => cmd_ls(&path, &store),
         Commands::Info { path, store } => cmd_info(&path, &store),
@@ -181,12 +187,13 @@ fn build_scan_rules(
 }
 
 fn cmd_scan(
-    source: &PathBuf,
-    store_path: &PathBuf,
+    source: &Path,
+    store_path: &Path,
     target: &str,
     presets: PresetFlags,
     ignore_regexes: &[String],
     archive_regexes: &[String],
+    prune: bool,
 ) -> Result<()> {
     println!("Scanning: {}", source.display());
     println!("Store:    {}", store_path.display());
@@ -224,6 +231,8 @@ fn cmd_scan(
             ScanOptions {
                 bundle_git_dirs: false,
                 rules,
+                prune_deleted: prune,
+                parallelism: None,
             },
             |progress| {
                 files_count.store(progress.files_processed, Ordering::Relaxed);
@@ -248,6 +257,8 @@ fn cmd_scan(
     println!("  Directories:     {}", stats.total_dirs);
     println!("  Unique blobs:    {}", stats.unique_blobs);
     println!("  Duplicate files: {}", stats.duplicate_files);
+    println!("  Unchanged files: {}", stats.unchanged_files);
+    println!("  Pruned entries:  {}", stats.pruned_entries);
     println!(
         "  Original size:   {}",
         format_size(stats.total_original_bytes)
@@ -280,7 +291,7 @@ fn cmd_scan(
     Ok(())
 }
 
-fn cmd_ls(path: &str, store_path: &PathBuf) -> Result<()> {
+fn cmd_ls(path: &str, store_path: &Path) -> Result<()> {
     let store = Store::open(store_path).context("failed to open store")?;
     let entries = store.list_dir(path).context("failed to list directory")?;
 
@@ -300,7 +311,7 @@ fn cmd_ls(path: &str, store_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_info(path: &str, store_path: &PathBuf) -> Result<()> {
+fn cmd_info(path: &str, store_path: &Path) -> Result<()> {
     let store = Store::open(store_path).context("failed to open store")?;
 
     match store.get_file(path)? {
@@ -342,7 +353,7 @@ fn cmd_info(path: &str, store_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_duplicates(store_path: &PathBuf) -> Result<()> {
+fn cmd_duplicates(store_path: &Path) -> Result<()> {
     let store = Store::open(store_path).context("failed to open store")?;
     let groups = store.find_all_duplicates()?;
 
@@ -368,7 +379,7 @@ fn cmd_duplicates(store_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_cat(path: &str, output: Option<&std::path::Path>, store_path: &PathBuf) -> Result<()> {
+fn cmd_cat(path: &str, output: Option<&std::path::Path>, store_path: &Path) -> Result<()> {
     let store = Store::open(store_path).context("failed to open store")?;
     let data = store.read_file(path)?;
 
