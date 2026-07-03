@@ -1,5 +1,19 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { open } from '@tauri-apps/plugin-dialog';
+
+export async function pickDirectory(title?: string): Promise<string | null> {
+	const selected = await open({ directory: true, multiple: false, title });
+	return typeof selected === 'string' ? selected : null;
+}
+
+export async function pickFile(
+	title?: string,
+	filters?: { name: string; extensions: string[] }[]
+): Promise<string | null> {
+	const selected = await open({ directory: false, multiple: false, title, filters });
+	return typeof selected === 'string' ? selected : null;
+}
 
 export interface DirEntry {
 	name: string;

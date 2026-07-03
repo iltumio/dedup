@@ -13,6 +13,8 @@
 		onLabelChange: (value: string) => void;
 		onTagsChange?: (value: string) => void;
 		onStorePathChange: (value: string) => void;
+		onBrowseFolder?: () => void;
+		onBrowseFile?: () => void;
 		onSubmit: () => void;
 		onBack: () => void;
 	}
@@ -27,6 +29,8 @@
 		onLabelChange,
 		onTagsChange,
 		onStorePathChange,
+		onBrowseFolder,
+		onBrowseFile,
 		onSubmit,
 		onBack
 	}: Props = $props();
@@ -82,14 +86,28 @@
 		{/if}
 
 		<UiField label="Store path" hint={storeHint}>
-			<input
-				class="input input-bordered input-sm w-full font-path"
-				type="text"
-				value={storePath}
-				placeholder={storePlaceholder}
-				disabled={loading}
-				oninput={(event) => onStorePathChange(inputValue(event))}
-			/>
+			<div class="flex gap-2">
+				<input
+					class="input input-bordered input-sm min-w-0 flex-1 font-path"
+					type="text"
+					value={storePath}
+					placeholder={storePlaceholder}
+					disabled={loading}
+					oninput={(event) => onStorePathChange(inputValue(event))}
+				/>
+				{#if mode === 'create'}
+					{#if onBrowseFolder}
+						<UiButton variant="secondary" disabled={loading} onclick={onBrowseFolder}>Browse</UiButton>
+					{/if}
+				{:else}
+					{#if onBrowseFolder}
+						<UiButton variant="secondary" disabled={loading} onclick={onBrowseFolder}>Folder</UiButton>
+					{/if}
+					{#if onBrowseFile}
+						<UiButton variant="secondary" disabled={loading} onclick={onBrowseFile}>File</UiButton>
+					{/if}
+				{/if}
+			</div>
 		</UiField>
 	</div>
 

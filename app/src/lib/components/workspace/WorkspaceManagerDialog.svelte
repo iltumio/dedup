@@ -30,6 +30,9 @@
 		onNewStorePathChange: (value: string) => void;
 		onImportLabelChange: (value: string) => void;
 		onImportStorePathChange: (value: string) => void;
+		onBrowseNewStore: () => void;
+		onBrowseImportStoreFolder: () => void;
+		onBrowseImportStoreFile: () => void;
 	}
 
 	let {
@@ -55,7 +58,10 @@
 		onNewTagsChange,
 		onNewStorePathChange,
 		onImportLabelChange,
-		onImportStorePathChange
+		onImportStorePathChange,
+		onBrowseNewStore,
+		onBrowseImportStoreFolder,
+		onBrowseImportStoreFile
 	}: Props = $props();
 </script>
 
@@ -73,6 +79,7 @@
 			onLabelChange={onNewLabelChange}
 			onTagsChange={onNewTagsChange}
 			onStorePathChange={onNewStorePathChange}
+			onBrowseFolder={onBrowseNewStore}
 		/>
 	{:else if mode === 'import'}
 		<WorkspaceForm
@@ -85,6 +92,8 @@
 			onSubmit={onImportStore}
 			onLabelChange={onImportLabelChange}
 			onStorePathChange={onImportStorePathChange}
+			onBrowseFolder={onBrowseImportStoreFolder}
+			onBrowseFile={onBrowseImportStoreFile}
 		/>
 	{:else}
 		<div class="flex flex-col gap-4">

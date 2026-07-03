@@ -15,6 +15,7 @@ fn main() {
     let config_path = workspace::default_config_path();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new(config_path))
         .invoke_handler(tauri::generate_handler![
             commands::list_dir,
