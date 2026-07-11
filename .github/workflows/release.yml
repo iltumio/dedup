@@ -82,14 +82,18 @@ jobs:
         with:
           key: app-${{ matrix.target }}
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: app/package-lock.json
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
         working-directory: app
 
       - name: Install Linux system dependencies
@@ -108,7 +112,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: app
-          tauriScript: npx tauri
+          tauriScript: pnpm tauri
           args: --target ${{ matrix.target }}
 
       - name: Upload app artifacts
@@ -152,12 +156,15 @@ jobs:
         run: |
           rustup default stable
 
+      - name: Setup pnpm
+        run: corepack enable && corepack prepare pnpm@11.3.0 --activate
+
       - name: Install frontend dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
         working-directory: app
 
       - name: Build Tauri app
-        run: npx tauri build --no-bundle
+        run: pnpm tauri build --no-bundle
         working-directory: app
 
       - name: Package as Arch pkg
