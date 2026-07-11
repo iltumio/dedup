@@ -3,10 +3,15 @@ name: Release
 # Runs when the Knope "Release PR" (branch `release`) is merged into main.
 # Builds every artifact, then `knope release` tags v$version, publishes the GitHub
 # release with the changelog notes, and uploads the built assets.
+#
+# Can also be triggered manually (workflow_dispatch) to re-run a release, e.g. to
+# re-publish assets for a version whose original run failed. knope derives the
+# version from the versioned files on the checked-out ref.
 on:
   pull_request:
     types: [closed]
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
@@ -17,7 +22,9 @@ permissions:
 
 jobs:
   build-cli:
-    if: github.event.pull_request.merged == true && github.head_ref == 'release'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true && github.head_ref == 'release')
     strategy:
       fail-fast: false
       matrix:
@@ -62,7 +69,9 @@ jobs:
           path: dedup-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}
 
   build-app:
-    if: github.event.pull_request.merged == true && github.head_ref == 'release'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true && github.head_ref == 'release')
     strategy:
       fail-fast: false
       matrix:
@@ -133,7 +142,9 @@ jobs:
             target/${{ matrix.target }}/release/bundle/macos/*.app
 
   build-app-arch:
-    if: github.event.pull_request.merged == true && github.head_ref == 'release'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true && github.head_ref == 'release')
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
@@ -218,7 +229,9 @@ jobs:
           path: /tmp/pkg/*.pkg.tar.zst
 
   release:
-    if: github.event.pull_request.merged == true && github.head_ref == 'release'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true && github.head_ref == 'release')
     needs: [build-cli, build-app, build-app-arch]
     runs-on: ubuntu-latest
     steps:
@@ -232,8 +245,28 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Display artifacts
-        run: find artifacts -type f | head -50
+      - name: Stage release assets
+        shell: bash
+        run: |
+          # After `merge-multiple`, the Tauri app bundles land in per-format
+          # subdirs (deb/, appimage/, dmg/, nsis/, msi/, macos/) because they were
+          # uploaded with multiple path globs. knope's `assets = artifacts/*`
+          # expects flat files, so pull the real distributables up to the root.
+          # The macOS `.app` is a directory (already shipped inside the .dmg) —
+          # leaving it nested means it gets dropped here, which is what we want.
+          shopt -s globstar nullglob
+          mkdir staged
+          # CLI binaries and the Arch package already sit at the artifacts root.
+          for f in artifacts/*; do [ -f "$f" ] && mv "$f" staged/; done
+          # App bundles are nested one level down, per format.
+          for f in artifacts/**/*.deb artifacts/**/*.AppImage artifacts/**/*.exe \
+                   artifacts/**/*.msi artifacts/**/*.dmg; do
+            mv "$f" staged/
+          done
+          rm -rf artifacts
+          mv staged artifacts
+          echo "Staged release assets:"
+          find artifacts -type f | sort
 
       - uses: knope-dev/action@v2.1.2
         with:
