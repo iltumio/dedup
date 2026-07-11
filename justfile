@@ -45,6 +45,14 @@ dev: install-frontend
 build-app: install-frontend
     pnpm -C app tauri build
 
+# Preview the next version bump + changelog without changing anything
+changelog-preview:
+    knope prepare-release --dry-run
+
+# Open/update the release PR locally (normally run by CI on push to main)
+release-pr:
+    knope prepare-release
+
 # Run all checks (CI equivalent)
 ci: fmt-check lint test
 
