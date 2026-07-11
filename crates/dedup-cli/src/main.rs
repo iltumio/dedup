@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use dedup_core::Store;
+use dedup_core::{BuiltinScanPreset, ScanOptions, ScanRule, ScanRuleAction, Store};
 
 #[derive(Parser)]
 #[command(name = "dedup", about = "Content-addressed file deduplication tool")]
@@ -29,6 +29,34 @@ enum Commands {
         /// Defaults to "/" (root). Existing content is preserved.
         #[arg(short, long, default_value = "/")]
         target: String,
+
+        /// Bundle each .git directory into one .git.tar archive blob.
+        #[arg(long)]
+        bundle_git_dirs: bool,
+
+        /// Remove store entries under the target that no longer exist at the source.
+        #[arg(long)]
+        prune: bool,
+
+        /// Ignore directories named target.
+        #[arg(long)]
+        ignore_rust_target: bool,
+
+        /// Ignore directories named node_modules.
+        #[arg(long)]
+        ignore_node_modules: bool,
+
+        /// Ignore directories named .venv or venv.
+        #[arg(long)]
+        ignore_python_venv: bool,
+
+        /// Ignore paths matching this full scan-relative regex. Repeatable.
+        #[arg(long = "ignore-regex")]
+        ignore_regexes: Vec<String>,
+
+        /// Archive directories matching this full scan-relative regex. Repeatable.
+        #[arg(long = "archive-regex")]
+        archive_regexes: Vec<String>,
     },
 
     /// List contents of a virtual directory in the store.
@@ -78,7 +106,31 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan { source, store, target } => cmd_scan(&source, &store, &target),
+        Commands::Scan {
+            source,
+            store,
+            target,
+            bundle_git_dirs,
+            prune,
+            ignore_rust_target,
+            ignore_node_modules,
+            ignore_python_venv,
+            ignore_regexes,
+            archive_regexes,
+        } => cmd_scan(
+            &source,
+            &store,
+            &target,
+            PresetFlags {
+                bundle_git_dirs,
+                ignore_rust_target,
+                ignore_node_modules,
+                ignore_python_venv,
+            },
+            &ignore_regexes,
+            &archive_regexes,
+            prune,
+        ),
         Commands::Ls { path, store } => cmd_ls(&path, &store),
         Commands::Info { path, store } => cmd_info(&path, &store),
         Commands::Duplicates { store } => cmd_duplicates(&store),
@@ -90,31 +142,114 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_scan(source: &PathBuf, store_path: &PathBuf, target: &str) -> Result<()> {
+#[derive(Debug, Clone, Copy)]
+struct PresetFlags {
+    bundle_git_dirs: bool,
+    ignore_rust_target: bool,
+    ignore_node_modules: bool,
+    ignore_python_venv: bool,
+}
+
+fn build_scan_rules(
+    presets: PresetFlags,
+    ignore_regexes: &[String],
+    archive_regexes: &[String],
+) -> Vec<ScanRule> {
+    let mut rules = Vec::new();
+
+    if presets.bundle_git_dirs {
+        rules.push(ScanRule::builtin(BuiltinScanPreset::Git));
+    }
+    if presets.ignore_rust_target {
+        rules.push(ScanRule::builtin(BuiltinScanPreset::RustTarget));
+    }
+    if presets.ignore_node_modules {
+        rules.push(ScanRule::builtin(BuiltinScanPreset::NodeModules));
+    }
+    if presets.ignore_python_venv {
+        rules.push(ScanRule::builtin(BuiltinScanPreset::PythonVenv));
+    }
+
+    rules.extend(
+        ignore_regexes
+            .iter()
+            .cloned()
+            .map(|pattern| ScanRule::new(pattern, ScanRuleAction::Ignore)),
+    );
+    rules.extend(
+        archive_regexes
+            .iter()
+            .cloned()
+            .map(|pattern| ScanRule::new(pattern, ScanRuleAction::Archive)),
+    );
+
+    rules
+}
+
+fn cmd_scan(
+    source: &Path,
+    store_path: &Path,
+    target: &str,
+    presets: PresetFlags,
+    ignore_regexes: &[String],
+    archive_regexes: &[String],
+    prune: bool,
+) -> Result<()> {
     println!("Scanning: {}", source.display());
     println!("Store:    {}", store_path.display());
     println!("Target:   {target}");
+    if presets.bundle_git_dirs {
+        println!("Git dirs: archived as .git.tar");
+    }
+    if presets.ignore_rust_target {
+        println!("Rust target: ignored");
+    }
+    if presets.ignore_node_modules {
+        println!("Node modules: ignored");
+    }
+    if presets.ignore_python_venv {
+        println!("Python virtual envs: ignored");
+    }
+    for pattern in ignore_regexes {
+        println!("Ignore regex: {pattern}");
+    }
+    for pattern in archive_regexes {
+        println!("Archive regex: {pattern}");
+    }
     println!();
 
     let store = Store::open(store_path).context("failed to open store")?;
 
     let last_file = std::sync::Mutex::new(String::new());
     let files_count = AtomicU64::new(0);
+    let rules = build_scan_rules(presets, ignore_regexes, archive_regexes);
 
-    let stats = store.scan_into(source, target, |progress| {
-        files_count.store(progress.files_processed, Ordering::Relaxed);
-        if let Ok(mut lf) = last_file.lock() {
-            *lf = progress.current_file.clone();
-        }
-        // Print progress every 100 files
-        if progress.files_processed % 100 == 0 || progress.files_processed == 1 {
-            eprint!(
-                "\r  Processed {} files ({})...",
-                progress.files_processed,
-                format_size(progress.bytes_processed)
-            );
-        }
-    }).context("scan failed")?;
+    let stats = store
+        .scan_into_with_options(
+            source,
+            target,
+            ScanOptions {
+                bundle_git_dirs: false,
+                rules,
+                prune_deleted: prune,
+                parallelism: None,
+            },
+            |progress| {
+                files_count.store(progress.files_processed, Ordering::Relaxed);
+                if let Ok(mut lf) = last_file.lock() {
+                    *lf = progress.current_file.clone();
+                }
+                // Print progress every 100 files
+                if progress.files_processed % 100 == 0 || progress.files_processed == 1 {
+                    eprint!(
+                        "\r  Processed {} files ({})...",
+                        progress.files_processed,
+                        format_size(progress.bytes_processed)
+                    );
+                }
+            },
+        )
+        .context("scan failed")?;
 
     eprintln!("\r                                                    ");
     println!("Scan complete!");
@@ -122,6 +257,8 @@ fn cmd_scan(source: &PathBuf, store_path: &PathBuf, target: &str) -> Result<()> 
     println!("  Directories:     {}", stats.total_dirs);
     println!("  Unique blobs:    {}", stats.unique_blobs);
     println!("  Duplicate files: {}", stats.duplicate_files);
+    println!("  Unchanged files: {}", stats.unchanged_files);
+    println!("  Pruned entries:  {}", stats.pruned_entries);
     println!(
         "  Original size:   {}",
         format_size(stats.total_original_bytes)
@@ -132,10 +269,16 @@ fn cmd_scan(source: &PathBuf, store_path: &PathBuf, target: &str) -> Result<()> 
     );
 
     if stats.total_original_bytes > 0 {
-        let saved_bytes = stats.total_original_bytes.saturating_sub(stats.total_stored_bytes);
+        let saved_bytes = stats
+            .total_original_bytes
+            .saturating_sub(stats.total_stored_bytes);
         let ratio = stats.total_stored_bytes as f64 / stats.total_original_bytes as f64;
         let saved_pct = (1.0 - ratio) * 100.0;
-        println!("  Space saved:     {} ({:.1}%)", format_size(saved_bytes), saved_pct);
+        println!(
+            "  Space saved:     {} ({:.1}%)",
+            format_size(saved_bytes),
+            saved_pct
+        );
     }
 
     if stats.skipped_files > 0 {
@@ -148,7 +291,7 @@ fn cmd_scan(source: &PathBuf, store_path: &PathBuf, target: &str) -> Result<()> 
     Ok(())
 }
 
-fn cmd_ls(path: &str, store_path: &PathBuf) -> Result<()> {
+fn cmd_ls(path: &str, store_path: &Path) -> Result<()> {
     let store = Store::open(store_path).context("failed to open store")?;
     let entries = store.list_dir(path).context("failed to list directory")?;
 
@@ -168,7 +311,7 @@ fn cmd_ls(path: &str, store_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_info(path: &str, store_path: &PathBuf) -> Result<()> {
+fn cmd_info(path: &str, store_path: &Path) -> Result<()> {
     let store = Store::open(store_path).context("failed to open store")?;
 
     match store.get_file(path)? {
@@ -210,7 +353,7 @@ fn cmd_info(path: &str, store_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_duplicates(store_path: &PathBuf) -> Result<()> {
+fn cmd_duplicates(store_path: &Path) -> Result<()> {
     let store = Store::open(store_path).context("failed to open store")?;
     let groups = store.find_all_duplicates()?;
 
@@ -236,7 +379,7 @@ fn cmd_duplicates(store_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_cat(path: &str, output: Option<&std::path::Path>, store_path: &PathBuf) -> Result<()> {
+fn cmd_cat(path: &str, output: Option<&std::path::Path>, store_path: &Path) -> Result<()> {
     let store = Store::open(store_path).context("failed to open store")?;
     let data = store.read_file(path)?;
 

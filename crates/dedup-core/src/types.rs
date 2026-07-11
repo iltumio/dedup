@@ -56,6 +56,10 @@ pub struct ScanStats {
     pub total_stored_bytes: u64,
     /// Number of files skipped due to read errors.
     pub skipped_files: u64,
+    /// Number of files skipped as unchanged (matched stored size + mtime).
+    pub unchanged_files: u64,
+    /// Number of stale entries pruned because they vanished from the source.
+    pub pruned_entries: u64,
     /// Path to the error log file (if any errors occurred).
     pub errors_log_path: Option<String>,
 }
@@ -70,6 +74,8 @@ impl ScanStats {
             total_original_bytes: 0,
             total_stored_bytes: 0,
             skipped_files: 0,
+            unchanged_files: 0,
+            pruned_entries: 0,
             errors_log_path: None,
         }
     }
@@ -96,8 +102,74 @@ pub struct ScanProgress {
     pub duplicates_found: u64,
     /// Number of files skipped due to errors so far.
     pub skipped_files: u64,
+    /// Number of unchanged files skipped (fast-path) so far.
+    pub unchanged_files: u64,
     /// Name of the file currently being processed.
     pub current_file: String,
+}
+
+/// Action to apply when a scan rule matches a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanRuleAction {
+    /// Skip matched files and directories.
+    Ignore,
+    /// Store a matched directory as one deterministic `.tar` file.
+    Archive,
+}
+
+/// Built-in scan rule presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinScanPreset {
+    Git,
+    RustTarget,
+    NodeModules,
+    PythonVenv,
+}
+
+/// A regex-based scan rule matched against the full scan-relative path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanRule {
+    pub pattern: String,
+    pub action: ScanRuleAction,
+}
+
+impl ScanRule {
+    pub fn new(pattern: impl Into<String>, action: ScanRuleAction) -> Self {
+        Self {
+            pattern: pattern.into(),
+            action,
+        }
+    }
+
+    pub fn builtin(preset: BuiltinScanPreset) -> Self {
+        match preset {
+            BuiltinScanPreset::Git => Self::new(r"(^|/)\.git$", ScanRuleAction::Archive),
+            BuiltinScanPreset::RustTarget => Self::new(r"(^|/)target$", ScanRuleAction::Ignore),
+            BuiltinScanPreset::NodeModules => {
+                Self::new(r"(^|/)node_modules$", ScanRuleAction::Ignore)
+            }
+            BuiltinScanPreset::PythonVenv => {
+                Self::new(r"(^|/)(\.venv|venv)$", ScanRuleAction::Ignore)
+            }
+        }
+    }
+}
+
+/// Options controlling scan behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ScanOptions {
+    /// Compatibility flag for storing each `.git` directory as one archive blob.
+    pub bundle_git_dirs: bool,
+    /// Ordered regex rules. First match wins.
+    pub rules: Vec<ScanRule>,
+    /// When set, store entries under the scan target that are absent from the
+    /// source get pruned (deletion detection). Off by default; scans are additive.
+    pub prune_deleted: bool,
+    /// Optional parallelism limit (None = auto-select, capped by the scanner).
+    pub parallelism: Option<usize>,
 }
 
 /// Per-extension statistics for analytics.
@@ -117,4 +189,60 @@ pub struct ExtensionStats {
     pub total_stored_bytes: u64,
     /// Bytes saved by deduplication + compression for this extension.
     pub bytes_saved: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::de::value::{Error as DeError, MapDeserializer, StrDeserializer};
+    use serde::Deserialize;
+
+    #[test]
+    fn scan_options_deserializes_missing_rules_as_default() {
+        let options = ScanOptions::deserialize(MapDeserializer::<_, DeError>::new(
+            [("bundle_git_dirs", true)].into_iter(),
+        ))
+        .unwrap();
+
+        assert!(options.bundle_git_dirs);
+        assert!(options.rules.is_empty());
+    }
+
+    #[test]
+    fn scan_options_deserializes_missing_bundle_git_dirs_as_default() {
+        let options = ScanOptions::deserialize(MapDeserializer::<_, DeError>::new(
+            [("rules", Vec::<bool>::new())].into_iter(),
+        ))
+        .unwrap();
+
+        assert!(!options.bundle_git_dirs);
+        assert!(options.rules.is_empty());
+    }
+
+    #[test]
+    fn scan_options_parallelism_defaults_to_none_and_deserializes_missing_as_none() {
+        assert!(ScanOptions::default().parallelism.is_none());
+
+        let options = ScanOptions::deserialize(MapDeserializer::<_, DeError>::new(
+            [("bundle_git_dirs", false)].into_iter(),
+        ))
+        .unwrap();
+        assert!(options.parallelism.is_none());
+    }
+
+    #[test]
+    fn scan_rule_enums_deserialize_public_snake_case_names() {
+        assert_eq!(
+            ScanRuleAction::deserialize(StrDeserializer::<DeError>::new("archive")).unwrap(),
+            ScanRuleAction::Archive
+        );
+        assert_eq!(
+            BuiltinScanPreset::deserialize(StrDeserializer::<DeError>::new("rust_target")).unwrap(),
+            BuiltinScanPreset::RustTarget
+        );
+        assert_eq!(
+            BuiltinScanPreset::deserialize(StrDeserializer::<DeError>::new("python_venv")).unwrap(),
+            BuiltinScanPreset::PythonVenv
+        );
+    }
 }

@@ -1,12 +1,16 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
 
 use crate::cid as cid_util;
 use cid::Cid;
+
+/// Process-wide counter making temp blob names unique per concurrent writer.
+static TMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// Flat blob store that keeps LZ4-compressed files keyed by CID.
 ///
@@ -52,8 +56,16 @@ impl ContentStore {
             return Ok(meta.len());
         }
 
-        // Write to a temp file then rename for atomicity.
-        let tmp_path = path.with_extension("lz4.tmp");
+        // Unique temp name per writer, then atomic rename: two threads storing
+        // the same CID write distinct temp files and both rename to identical
+        // content, so last-writer-wins is safe.
+        let nonce = TMP_NONCE.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = self.blobs_dir.join(format!(
+            "{}.{}.{}.tmp",
+            cid_util::cid_to_string(cid),
+            std::process::id(),
+            nonce
+        ));
 
         let file = fs::File::create(&tmp_path)
             .with_context(|| format!("failed to create temp blob: {}", tmp_path.display()))?;
@@ -144,5 +156,42 @@ mod tests {
         let cid = compute_cid(b"nonexistent");
         assert!(!store.exists(&cid));
         assert!(store.read(&cid).is_err());
+    }
+
+    #[test]
+    fn concurrent_store_of_same_cid_is_safe() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = TempDir::new().unwrap();
+        let store = Arc::new(ContentStore::open(tmp.path()).unwrap());
+        let data = vec![7u8; 64 * 1024];
+        let cid = compute_cid(&data);
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let data = data.clone();
+                thread::spawn(move || {
+                    store.store(&cid, &data).unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert!(store.exists(&cid));
+        assert_eq!(store.read(&cid).unwrap(), data);
+
+        let leftover_tmp: Vec<String> = fs::read_dir(tmp.path().join("blobs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftover_tmp.is_empty(),
+            "leftover temp files: {leftover_tmp:?}"
+        );
     }
 }

@@ -1,6 +1,9 @@
 # Rust
 /target/
 Cargo.lock
+.worktrees/
+.superpowers/
+.codebase-memory/
 
 # Node
 app/node_modules/

@@ -1,16 +1,23 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
-use dedup_core::{DirEntry, ExtensionStats, FileMetadata, ScanProgress, ScanStats, Store};
+use dedup_core::{
+    DirEntry, ExtensionStats, FileMetadata, ScanOptions, ScanProgress, ScanRule, ScanStats, Store,
+};
+use regex::Regex;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::workspace::{self, Workspace, WorkspacesConfig};
+use crate::workspace::{self, CustomScanRule, Workspace, WorkspacesConfig};
 
 /// Shared application state holding the current store and workspaces.
 pub struct AppState {
     pub store: Mutex<Option<Store>>,
     pub store_path: Mutex<PathBuf>,
     pub workspaces: Mutex<WorkspacesConfig>,
+    pub scan_cancelled: Arc<AtomicBool>,
     pub config_path: PathBuf,
 }
 
@@ -26,6 +33,7 @@ impl AppState {
             store: Mutex::new(None),
             store_path: Mutex::new(initial_store_path),
             workspaces: Mutex::new(config),
+            scan_cancelled: Arc::new(AtomicBool::new(false)),
             config_path,
         }
     }
@@ -44,6 +52,26 @@ impl AppState {
     fn save_config(&self) -> Result<(), String> {
         let config = self.workspaces.lock().map_err(|e| e.to_string())?;
         config.save(&self.config_path)
+    }
+
+    fn update_config_transactionally<F>(&self, update: F) -> Result<WorkspacesConfig, String>
+    where
+        F: FnOnce(&mut WorkspacesConfig) -> Result<(), String>,
+    {
+        let mut config = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let previous = config.clone();
+
+        if let Err(e) = update(&mut config) {
+            *config = previous;
+            return Err(e);
+        }
+
+        if let Err(e) = config.save(&self.config_path) {
+            *config = previous;
+            return Err(e);
+        }
+
+        Ok(config.clone())
     }
 }
 
@@ -94,10 +122,7 @@ pub fn open_file(state: State<'_, AppState>, path: String) -> Result<(), String>
     let data = store.read_file(&path).map_err(|e| e.to_string())?;
 
     // Extract the original filename from the virtual path
-    let filename = path
-        .rsplit('/')
-        .next()
-        .unwrap_or("file");
+    let filename = path.rsplit('/').next().unwrap_or("file");
 
     // Write to a temp file preserving the original name so the OS picks the right app
     let tmp_dir = std::env::temp_dir().join("dedup-preview");
@@ -159,9 +184,19 @@ pub async fn scan_directory(
     state: State<'_, AppState>,
     source: String,
     target_path: String,
+    bundle_git_dirs: Option<bool>,
+    rules: Option<Vec<ScanRule>>,
 ) -> Result<ScanStats, String> {
+    let bundle_git_dirs = bundle_git_dirs.unwrap_or(false);
+    let mut rules = rules.unwrap_or_default();
+    if bundle_git_dirs {
+        rules.insert(0, ScanRule::builtin(dedup_core::BuiltinScanPreset::Git));
+    }
+    state.scan_cancelled.store(false, Ordering::Relaxed);
+
     let store_path_buf = state.store_path.lock().map_err(|e| e.to_string())?.clone();
     let source_path = PathBuf::from(&source);
+    let cancel_flag = Arc::clone(&state.scan_cancelled);
 
     // Take the store out of state (or open a fresh one).
     // redb locks the DB file, so we can't have two Store handles simultaneously.
@@ -176,12 +211,19 @@ pub async fn scan_directory(
     // Spawn the heavy scanning work on a blocking thread
     let result = tokio::task::spawn_blocking(move || {
         let stats = store
-            .scan_into(
+            .scan_into_with_options_and_cancellation(
                 &source_path,
                 &target_path,
+                ScanOptions {
+                    bundle_git_dirs: false,
+                    rules,
+                    prune_deleted: false,
+                    parallelism: None,
+                },
                 move |progress: &ScanProgress| {
                     let _ = app.emit("scan-progress", progress.clone());
                 },
+                || cancel_flag.load(Ordering::Relaxed),
             )
             .map_err(|e| e.to_string());
         (store, stats)
@@ -190,13 +232,15 @@ pub async fn scan_directory(
     .map_err(|e| format!("Scan task failed: {e}"))?;
 
     let (store, stats) = result;
-    let stats = stats?;
 
     // Put the store back into state so subsequent queries work
     {
         let mut store_guard = state.store.lock().map_err(|e| e.to_string())?;
         *store_guard = Some(store);
     }
+    state.scan_cancelled.store(false, Ordering::Relaxed);
+
+    let stats = stats?;
 
     // Accumulate stats on the active workspace
     {
@@ -222,12 +266,66 @@ pub async fn scan_directory(
     Ok(stats)
 }
 
+#[tauri::command]
+pub fn cancel_scan(state: State<'_, AppState>) -> Result<(), String> {
+    state.scan_cancelled.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
 // ── Workspace commands ──────────────────────────────────────────────
+
+fn validate_custom_scan_rule(rule: &CustomScanRule) -> Result<(), String> {
+    if rule.label.trim().is_empty() {
+        return Err("Rule label cannot be empty.".to_string());
+    }
+    if rule.pattern.trim().is_empty() {
+        return Err("Rule regex cannot be empty.".to_string());
+    }
+    Regex::new(&rule.pattern)
+        .map(|_| ())
+        .map_err(|e| format!("Invalid regex: {e}"))
+}
+
+fn merge_custom_scan_rules(config: &mut WorkspacesConfig, rules: Vec<CustomScanRule>) {
+    for rule in rules {
+        if let Some(existing) = config
+            .custom_scan_rules
+            .iter_mut()
+            .find(|existing| existing.id == rule.id)
+        {
+            *existing = rule;
+        } else {
+            config.custom_scan_rules.push(rule);
+        }
+    }
+}
 
 #[tauri::command]
 pub fn list_workspaces(state: State<'_, AppState>) -> Result<WorkspacesConfig, String> {
     let config = state.workspaces.lock().map_err(|e| e.to_string())?;
     Ok(config.clone())
+}
+
+#[tauri::command]
+pub fn list_custom_scan_rules(state: State<'_, AppState>) -> Result<Vec<CustomScanRule>, String> {
+    let config = state.workspaces.lock().map_err(|e| e.to_string())?;
+    Ok(config.custom_scan_rules.clone())
+}
+
+#[tauri::command]
+pub fn save_custom_scan_rules(
+    state: State<'_, AppState>,
+    rules: Vec<CustomScanRule>,
+) -> Result<Vec<CustomScanRule>, String> {
+    for rule in &rules {
+        validate_custom_scan_rule(rule)?;
+    }
+
+    let config = state.update_config_transactionally(|config| {
+        config.custom_scan_rules = rules;
+        Ok(())
+    })?;
+    Ok(config.custom_scan_rules)
 }
 
 #[tauri::command]
@@ -265,7 +363,10 @@ pub fn create_workspace(
 }
 
 #[tauri::command]
-pub fn switch_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<Workspace, String> {
+pub fn switch_workspace(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<Workspace, String> {
     let ws = {
         let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
         let ws = config
@@ -315,105 +416,192 @@ pub fn export_workspaces(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn import_workspaces(state: State<'_, AppState>, json: String) -> Result<WorkspacesConfig, String> {
+pub fn import_workspaces(
+    state: State<'_, AppState>,
+    json: String,
+) -> Result<WorkspacesConfig, String> {
     let imported: WorkspacesConfig = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    for rule in &imported.custom_scan_rules {
+        validate_custom_scan_rule(rule)?;
+    }
 
-    {
-        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+    state.update_config_transactionally(|config| {
         // Merge: add workspaces that don't already exist (by ID)
         for ws in imported.workspaces {
-            if !config.workspaces.iter().any(|existing| existing.id == ws.id) {
+            if !config
+                .workspaces
+                .iter()
+                .any(|existing| existing.id == ws.id)
+            {
                 config.workspaces.push(ws);
             }
         }
-    }
 
-    state.save_config()?;
-    let config = state.workspaces.lock().map_err(|e| e.to_string())?;
-    Ok(config.clone())
+        merge_custom_scan_rules(config, imported.custom_scan_rules);
+        Ok(())
+    })
 }
 
 #[tauri::command]
 pub fn import_workspace(
- state: State<'_, AppState>,
- store_path: String,
- label: String,
+    state: State<'_, AppState>,
+    store_path: String,
+    label: String,
 ) -> Result<Workspace, String> {
- let path = PathBuf::from(&store_path);
+    let path = PathBuf::from(&store_path);
 
- // If the user selected a metadata.redb file, use its parent directory
- let store_dir = if path.is_file()
- && path
- .file_name()
- .map(|n| n == "metadata.redb")
- .unwrap_or(false)
- {
- path.parent()
- .ok_or_else(|| "Cannot determine store directory from file path".to_string())?
- .to_path_buf()
- } else {
- path
- };
+    // If the user selected a metadata.redb file, use its parent directory
+    let store_dir = if path.is_file()
+        && path
+            .file_name()
+            .map(|n| n == "metadata.redb")
+            .unwrap_or(false)
+    {
+        path.parent()
+            .ok_or_else(|| "Cannot determine store directory from file path".to_string())?
+            .to_path_buf()
+    } else {
+        path
+    };
 
- // Validate the store directory exists and has the expected structure
- let metadata_path = store_dir.join("metadata.redb");
- if !metadata_path.exists() {
- return Err(format!(
- "Invalid store directory: metadata.redb not found in {}",
- store_dir.display()
- ));
- }
+    // Validate the store directory exists and has the expected structure
+    let metadata_path = store_dir.join("metadata.redb");
+    if !metadata_path.exists() {
+        return Err(format!(
+            "Invalid store directory: metadata.redb not found in {}",
+            store_dir.display()
+        ));
+    }
 
- // Check that a workspace with this store path doesn't already exist
- let store_dir_str = store_dir.to_string_lossy().to_string();
- {
- let config = state.workspaces.lock().map_err(|e| e.to_string())?;
- if config
- .workspaces
- .iter()
- .any(|w| w.store_path == store_dir_str)
- {
- return Err("A workspace with this store path already exists.".to_string());
- }
- }
+    // Check that a workspace with this store path doesn't already exist
+    let store_dir_str = store_dir.to_string_lossy().to_string();
+    {
+        let config = state.workspaces.lock().map_err(|e| e.to_string())?;
+        if config
+            .workspaces
+            .iter()
+            .any(|w| w.store_path == store_dir_str)
+        {
+            return Err("A workspace with this store path already exists.".to_string());
+        }
+    }
 
- // Open the store to compute stats
- let store = Store::open(&store_dir).map_err(|e| e.to_string())?;
- let (total_files, total_dirs, unique_blobs, duplicate_files, total_original_bytes, total_stored_bytes) =
- store.compute_stats().map_err(|e| e.to_string())?;
+    // Open the store to compute stats
+    let store = Store::open(&store_dir).map_err(|e| e.to_string())?;
+    let (
+        total_files,
+        total_dirs,
+        unique_blobs,
+        duplicate_files,
+        total_original_bytes,
+        total_stored_bytes,
+    ) = store.compute_stats().map_err(|e| e.to_string())?;
 
- let now = std::time::SystemTime::now()
- .duration_since(std::time::UNIX_EPOCH)
- .unwrap_or_default()
- .as_secs();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
- let ws = Workspace {
- id: workspace::generate_id(),
- label,
- tags: vec!["imported".to_string()],
- store_path: store_dir_str,
- created_at: now,
- stats: workspace::WorkspaceStats {
- total_files,
- total_dirs,
- unique_blobs,
- duplicate_files,
- total_original_bytes,
- total_stored_bytes,
- scans_count: 0,
- last_scan_at: 0,
- },
- };
+    let ws = Workspace {
+        id: workspace::generate_id(),
+        label,
+        tags: vec!["imported".to_string()],
+        store_path: store_dir_str,
+        created_at: now,
+        stats: workspace::WorkspaceStats {
+            total_files,
+            total_dirs,
+            unique_blobs,
+            duplicate_files,
+            total_original_bytes,
+            total_stored_bytes,
+            scans_count: 0,
+            last_scan_at: 0,
+        },
+    };
 
- {
- let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
- config.workspaces.push(ws.clone());
- // Auto-activate if it's the only workspace
- if config.workspaces.len() == 1 {
- config.active_workspace_id = Some(ws.id.clone());
- }
- }
+    {
+        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+        config.workspaces.push(ws.clone());
+        // Auto-activate if it's the only workspace
+        if config.workspaces.len() == 1 {
+            config.active_workspace_id = Some(ws.id.clone());
+        }
+    }
 
- state.save_config()?;
- Ok(ws)
+    state.save_config()?;
+    Ok(ws)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn custom_rule(id: &str, label: &str, pattern: &str) -> CustomScanRule {
+        CustomScanRule {
+            id: id.to_string(),
+            label: label.to_string(),
+            pattern: pattern.to_string(),
+            action: workspace::CustomScanRuleAction::Ignore,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn merge_custom_scan_rules_replaces_existing_rules_by_id_and_appends_new_rules() {
+        let mut config = WorkspacesConfig {
+            workspaces: Vec::new(),
+            active_workspace_id: None,
+            custom_scan_rules: vec![
+                custom_rule("keep", "Keep", "keep"),
+                custom_rule("replace", "Old", "old"),
+            ],
+        };
+
+        merge_custom_scan_rules(
+            &mut config,
+            vec![
+                custom_rule("replace", "New", "new"),
+                custom_rule("append", "Append", "append"),
+            ],
+        );
+
+        assert_eq!(config.custom_scan_rules.len(), 3);
+        assert_eq!(config.custom_scan_rules[0].id, "keep");
+        assert_eq!(config.custom_scan_rules[1].id, "replace");
+        assert_eq!(config.custom_scan_rules[1].label, "New");
+        assert_eq!(config.custom_scan_rules[1].pattern, "new");
+        assert_eq!(config.custom_scan_rules[2].id, "append");
+    }
+
+    #[test]
+    fn transactional_config_update_restores_previous_rules_when_save_fails() {
+        let config_dir =
+            std::env::temp_dir().join(format!("dedup-config-dir-{}", workspace::generate_id()));
+        std::fs::create_dir_all(&config_dir).expect("test config directory should be created");
+
+        let state = AppState::new(config_dir.clone());
+        {
+            let mut config = state
+                .workspaces
+                .lock()
+                .expect("workspace lock should be available");
+            config.custom_scan_rules = vec![custom_rule("old", "Old", "old")];
+        }
+
+        let result = state.update_config_transactionally(|config| {
+            config.custom_scan_rules = vec![custom_rule("new", "New", "new")];
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        let config = state
+            .workspaces
+            .lock()
+            .expect("workspace lock should be available");
+        assert_eq!(config.custom_scan_rules.len(), 1);
+        assert_eq!(config.custom_scan_rules[0].id, "old");
+
+        std::fs::remove_dir_all(config_dir).expect("test config directory should be removed");
+    }
 }

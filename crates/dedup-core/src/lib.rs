@@ -14,7 +14,10 @@ pub mod types;
 
 pub use content_store::ContentStore;
 pub use metadata::MetadataDb;
-pub use types::{DirEntry, DirMetadata, ExtensionStats, FileMetadata, ScanProgress, ScanStats};
+pub use types::{
+    BuiltinScanPreset, DirEntry, DirMetadata, ExtensionStats, FileMetadata, ScanOptions,
+    ScanProgress, ScanRule, ScanRuleAction, ScanStats,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -61,11 +64,91 @@ impl Store {
     /// Existing entries in the store are preserved. New entries are added
     /// under `target_path`. The `on_progress` callback is invoked after
     /// each file is processed.
-    pub fn scan_into<F>(&self, source: &Path, target_path: &str, on_progress: F) -> Result<ScanStats>
+    pub fn scan_into<F>(
+        &self,
+        source: &Path,
+        target_path: &str,
+        on_progress: F,
+    ) -> Result<ScanStats>
     where
         F: Fn(&types::ScanProgress),
     {
-        scanner::scan_directory_into(source, target_path, &self.root, &self.content, &self.metadata, on_progress)
+        scanner::scan_directory_into(
+            source,
+            target_path,
+            &self.root,
+            &self.content,
+            &self.metadata,
+            on_progress,
+        )
+    }
+
+    /// Scan a source directory into a target virtual path with explicit options.
+    pub fn scan_into_with_options<F>(
+        &self,
+        source: &Path,
+        target_path: &str,
+        options: ScanOptions,
+        on_progress: F,
+    ) -> Result<ScanStats>
+    where
+        F: Fn(&types::ScanProgress),
+    {
+        scanner::scan_directory_into_with_options(
+            source,
+            target_path,
+            &self.root,
+            &self.content,
+            &self.metadata,
+            options,
+            on_progress,
+        )
+    }
+
+    /// Scan a source directory into a target virtual path with cooperative cancellation.
+    pub fn scan_into_with_cancellation<F, C>(
+        &self,
+        source: &Path,
+        target_path: &str,
+        on_progress: F,
+        should_cancel: C,
+    ) -> Result<ScanStats>
+    where
+        F: Fn(&types::ScanProgress),
+        C: Fn() -> bool,
+    {
+        self.scan_into_with_options_and_cancellation(
+            source,
+            target_path,
+            ScanOptions::default(),
+            on_progress,
+            should_cancel,
+        )
+    }
+
+    /// Scan a source directory into a target virtual path with options and cooperative cancellation.
+    pub fn scan_into_with_options_and_cancellation<F, C>(
+        &self,
+        source: &Path,
+        target_path: &str,
+        options: ScanOptions,
+        on_progress: F,
+        should_cancel: C,
+    ) -> Result<ScanStats>
+    where
+        F: Fn(&types::ScanProgress),
+        C: Fn() -> bool,
+    {
+        scanner::scan_directory_into_with_options_and_cancellation(
+            source,
+            target_path,
+            &self.root,
+            &self.content,
+            &self.metadata,
+            options,
+            on_progress,
+            should_cancel,
+        )
     }
 
     /// List entries in a virtual directory.
@@ -117,11 +200,11 @@ impl Store {
         self.metadata.extension_stats()
     }
 
- /// Compute aggregate statistics for the entire store.
- ///
- /// Returns (total_files, total_dirs, unique_blobs, duplicate_files,
- /// total_original_bytes, total_stored_bytes).
- pub fn compute_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64)> {
- self.metadata.compute_stats()
- }
+    /// Compute aggregate statistics for the entire store.
+    ///
+    /// Returns (total_files, total_dirs, unique_blobs, duplicate_files,
+    /// total_original_bytes, total_stored_bytes).
+    pub fn compute_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64)> {
+        self.metadata.compute_stats()
+    }
 }

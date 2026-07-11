@@ -35,15 +35,15 @@ fmt-check:
 
 # Install frontend dependencies
 install-frontend:
-    npm ci --prefix app
+    pnpm -C app install --frozen-lockfile
 
 # Run the Tauri dev server
 dev: install-frontend
-    npm run tauri dev --prefix app
+    pnpm -C app tauri dev
 
 # Build the Tauri app in release mode
 build-app: install-frontend
-    npm run tauri build --prefix app
+    pnpm -C app tauri build
 
 # Run all checks (CI equivalent)
 ci: fmt-check lint test

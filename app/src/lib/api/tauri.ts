@@ -1,5 +1,19 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { open } from '@tauri-apps/plugin-dialog';
+
+export async function pickDirectory(title?: string): Promise<string | null> {
+	const selected = await open({ directory: true, multiple: false, title });
+	return typeof selected === 'string' ? selected : null;
+}
+
+export async function pickFile(
+	title?: string,
+	filters?: { name: string; extensions: string[] }[]
+): Promise<string | null> {
+	const selected = await open({ directory: false, multiple: false, title, filters });
+	return typeof selected === 'string' ? selected : null;
+}
 
 export interface DirEntry {
 	name: string;
@@ -24,6 +38,8 @@ export interface ScanStats {
 	duplicate_files: number;
 	total_original_bytes: number;
 	total_stored_bytes: number;
+	skipped_files: number;
+	errors_log_path: string | null;
 }
 
 export interface ScanProgress {
@@ -32,7 +48,15 @@ export interface ScanProgress {
 	bytes_processed: number;
 	bytes_stored: number;
 	duplicates_found: number;
+	skipped_files: number;
 	current_file: string;
+}
+
+export type ScanRuleAction = 'ignore' | 'archive';
+
+export interface ScanRule {
+	pattern: string;
+	action: ScanRuleAction;
 }
 
 export async function listDir(path: string): Promise<DirEntry[]> {
@@ -57,9 +81,15 @@ export async function findDuplicates(path: string): Promise<string[]> {
 
 export async function scanDirectory(
 	source: string,
-	targetPath: string
+	targetPath: string,
+	bundleGitDirs = false,
+	rules: ScanRule[] = []
 ): Promise<ScanStats> {
-	return invoke('scan_directory', { source, targetPath });
+	return invoke('scan_directory', { source, targetPath, bundleGitDirs, rules });
+}
+
+export async function cancelScan(): Promise<void> {
+	return invoke('cancel_scan');
 }
 
 export async function findAllDuplicates(): Promise<[string, string[]][]> {
@@ -120,13 +150,30 @@ export interface Workspace {
 	stats: WorkspaceStats;
 }
 
+export interface CustomScanRule {
+	id: string;
+	label: string;
+	pattern: string;
+	action: ScanRuleAction;
+	enabled: boolean;
+}
+
 export interface WorkspacesConfig {
 	workspaces: Workspace[];
 	active_workspace_id: string | null;
+	custom_scan_rules: CustomScanRule[];
 }
 
 export async function listWorkspaces(): Promise<WorkspacesConfig> {
 	return invoke('list_workspaces');
+}
+
+export async function listCustomScanRules(): Promise<CustomScanRule[]> {
+	return invoke('list_custom_scan_rules');
+}
+
+export async function saveCustomScanRules(rules: CustomScanRule[]): Promise<CustomScanRule[]> {
+	return invoke('save_custom_scan_rules', { rules });
 }
 
 export async function createWorkspace(

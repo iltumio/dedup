@@ -2,7 +2,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use redb::{
-    Database, MultimapTableDefinition, ReadableMultimapTable, ReadableTable, TableDefinition,
+    Database, Durability, MultimapTableDefinition, ReadableMultimapTable, ReadableTable,
+    TableDefinition,
 };
 
 use crate::types::{DirEntry, DirMetadata, ExtensionStats, FileMetadata};
@@ -69,20 +70,113 @@ impl MetadataDb {
         Ok(())
     }
 
+    /// Insert or update file and directory metadata in a single transaction.
+    pub fn write_batch(
+        &self,
+        files: &[(String, FileMetadata, String)],
+        dirs: &[(String, DirMetadata)],
+        durable: bool,
+    ) -> Result<()> {
+        let mut write_txn = self.db.begin_write()?;
+        if !durable {
+            write_txn.set_durability(Durability::None);
+        }
+        {
+            let mut paths = write_txn.open_table(PATHS_TABLE)?;
+            let mut cid_paths = write_txn.open_multimap_table(CID_PATHS_TABLE)?;
+            let mut dirs_table = write_txn.open_table(DIRS_TABLE)?;
+
+            for (path, meta, cid_str) in files {
+                let encoded =
+                    bincode::serialize(meta).context("failed to serialize FileMetadata")?;
+                paths.insert(path.as_str(), encoded.as_slice())?;
+                cid_paths.insert(cid_str.as_str(), path.as_str())?;
+            }
+
+            for (path, meta) in dirs {
+                let encoded =
+                    bincode::serialize(meta).context("failed to serialize DirMetadata")?;
+                dirs_table.insert(path.as_str(), encoded.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
     /// Resolve a file path to its metadata.
     pub fn get_file(&self, path: &str) -> Result<Option<FileMetadata>> {
         let read_txn = self.db.begin_read()?;
         let paths = read_txn.open_table(PATHS_TABLE)?;
 
-        match paths.get(path)? {
-            Some(guard) => {
-                let bytes = guard.value();
-                let meta: FileMetadata =
-                    bincode::deserialize(bytes).context("failed to deserialize FileMetadata")?;
-                Ok(Some(meta))
-            }
-            None => Ok(None),
+        if let Some(guard) = paths.get(path)? {
+            let bytes = guard.value();
+            let meta: FileMetadata =
+                bincode::deserialize(bytes).context("failed to deserialize FileMetadata")?;
+            Ok(Some(meta))
+        } else {
+            Ok(None)
         }
+    }
+
+    /// Remove file and directory entries whose path starts with `scope_prefix`
+    /// yet is absent from `seen`. Returns the count of entries removed.
+    pub fn prune_missing(
+        &self,
+        scope_prefix: &str,
+        seen: &std::collections::HashSet<String>,
+    ) -> Result<u64> {
+        let write_txn = self.db.begin_write()?;
+        let mut removed = 0u64;
+        {
+            let mut paths = write_txn.open_table(PATHS_TABLE)?;
+            let mut cid_paths = write_txn.open_multimap_table(CID_PATHS_TABLE)?;
+            let mut dirs = write_txn.open_table(DIRS_TABLE)?;
+
+            let mut stale_files: Vec<(String, String)> = Vec::new();
+            {
+                let range = paths.range::<&str>(scope_prefix..)?;
+                for item in range {
+                    let (key, value) = item?;
+                    let key_str = key.value();
+                    if !key_str.starts_with(scope_prefix) {
+                        break;
+                    }
+                    if !seen.contains(key_str) {
+                        let meta: FileMetadata = bincode::deserialize(value.value())
+                            .context("failed to deserialize FileMetadata")?;
+                        let cid_str =
+                            crate::cid::cid_to_string(&crate::cid::cid_from_bytes(&meta.cid)?);
+                        stale_files.push((key_str.to_string(), cid_str));
+                    }
+                }
+            }
+            for (path, cid_str) in &stale_files {
+                paths.remove(path.as_str())?;
+                cid_paths.remove(cid_str.as_str(), path.as_str())?;
+                removed += 1;
+            }
+
+            let mut stale_dirs: Vec<String> = Vec::new();
+            {
+                let range = dirs.range::<&str>(scope_prefix..)?;
+                for item in range {
+                    let (key, _value) = item?;
+                    let key_str = key.value();
+                    if !key_str.starts_with(scope_prefix) {
+                        break;
+                    }
+                    if !seen.contains(key_str) {
+                        stale_dirs.push(key_str.to_string());
+                    }
+                }
+            }
+            for path in &stale_dirs {
+                dirs.remove(path.as_str())?;
+                removed += 1;
+            }
+        }
+        write_txn.commit()?;
+        Ok(removed)
     }
 
     /// List immediate children of a directory.
@@ -273,9 +367,7 @@ impl MetadataDb {
                 .unwrap_or_default();
 
             // Check if this file's CID has duplicates
-            let cid_str = crate::cid::cid_to_string(
-                &crate::cid::cid_from_bytes(&meta.cid)?,
-            );
+            let cid_str = crate::cid::cid_to_string(&crate::cid::cid_from_bytes(&meta.cid)?);
             let is_dup = cid_count.get(&cid_str).copied().unwrap_or(1) > 1;
 
             let acc = ext_map.entry(ext).or_insert(ExtAcc {
@@ -303,80 +395,93 @@ impl MetadataDb {
                     0.0
                 };
                 ExtensionStats {
-                    extension: if ext.is_empty() { "(no ext)".into() } else { ext },
+                    extension: if ext.is_empty() {
+                        "(no ext)".into()
+                    } else {
+                        ext
+                    },
                     total_files: acc.total_files,
                     duplicate_files: acc.duplicate_files,
                     duplicate_pct: (dup_pct * 10.0).round() / 10.0,
                     total_original_bytes: acc.total_original_bytes,
                     total_stored_bytes: acc.total_stored_bytes,
-                    bytes_saved: acc.total_original_bytes.saturating_sub(acc.total_stored_bytes),
+                    bytes_saved: acc
+                        .total_original_bytes
+                        .saturating_sub(acc.total_stored_bytes),
                 }
             })
             .collect();
 
         // Sort by bytes_saved descending (biggest savers first)
-        result.sort_by(|a, b| b.bytes_saved.cmp(&a.bytes_saved));
+        result.sort_by_key(|stats| std::cmp::Reverse(stats.bytes_saved));
 
         Ok(result)
     }
 
- /// Compute aggregate statistics for the entire store.
- ///
- /// Returns (total_files, total_dirs, unique_blobs, duplicate_files,
- /// total_original_bytes, total_stored_bytes).
- pub fn compute_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64)> {
- let read_txn = self.db.begin_read()?;
- let paths_table = read_txn.open_table(PATHS_TABLE)?;
- let dirs_table = read_txn.open_table(DIRS_TABLE)?;
- let cid_paths = read_txn.open_multimap_table(CID_PATHS_TABLE)?;
+    /// Compute aggregate statistics for the entire store.
+    ///
+    /// Returns (total_files, total_dirs, unique_blobs, duplicate_files,
+    /// total_original_bytes, total_stored_bytes).
+    pub fn compute_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64)> {
+        let read_txn = self.db.begin_read()?;
+        let paths_table = read_txn.open_table(PATHS_TABLE)?;
+        let dirs_table = read_txn.open_table(DIRS_TABLE)?;
+        let cid_paths = read_txn.open_multimap_table(CID_PATHS_TABLE)?;
 
- // Count files and accumulate byte totals
- let mut total_files: u64 = 0;
- let mut total_original_bytes: u64 = 0;
- let mut total_stored_bytes: u64 = 0;
- {
- let iter = paths_table.iter()?;
- for item in iter {
- let item = item?;
- let meta: FileMetadata = bincode::deserialize(item.1.value())
- .context("failed to deserialize FileMetadata")?;
- total_files += 1;
- total_original_bytes += meta.original_size;
- total_stored_bytes += meta.compressed_size;
- }
- }
+        // Count files and accumulate byte totals
+        let mut total_files: u64 = 0;
+        let mut total_original_bytes: u64 = 0;
+        let mut total_stored_bytes: u64 = 0;
+        {
+            let iter = paths_table.iter()?;
+            for item in iter {
+                let item = item?;
+                let meta: FileMetadata = bincode::deserialize(item.1.value())
+                    .context("failed to deserialize FileMetadata")?;
+                total_files += 1;
+                total_original_bytes += meta.original_size;
+                total_stored_bytes += meta.compressed_size;
+            }
+        }
 
- // Count directories
- let mut total_dirs: u64 = 0;
- {
- let iter = dirs_table.iter()?;
- for item in iter {
- item?;
- total_dirs += 1;
- }
- }
+        // Count directories
+        let mut total_dirs: u64 = 0;
+        {
+            let iter = dirs_table.iter()?;
+            for item in iter {
+                item?;
+                total_dirs += 1;
+            }
+        }
 
- // Count unique blobs and duplicate files
- let mut unique_blobs: u64 = 0;
- let mut duplicate_files: u64 = 0;
- {
- let iter = cid_paths.iter()?;
- for item in iter {
- let (_key, values) = item?;
- let mut count: u64 = 0;
- for v in values {
- v?;
- count += 1;
- }
- unique_blobs += 1;
- if count > 1 {
- duplicate_files += count;
- }
- }
- }
+        // Count unique blobs and duplicate files
+        let mut unique_blobs: u64 = 0;
+        let mut duplicate_files: u64 = 0;
+        {
+            let iter = cid_paths.iter()?;
+            for item in iter {
+                let (_key, values) = item?;
+                let mut count: u64 = 0;
+                for v in values {
+                    v?;
+                    count += 1;
+                }
+                unique_blobs += 1;
+                if count > 1 {
+                    duplicate_files += count;
+                }
+            }
+        }
 
- Ok((total_files, total_dirs, unique_blobs, duplicate_files, total_original_bytes, total_stored_bytes))
- }
+        Ok((
+            total_files,
+            total_dirs,
+            unique_blobs,
+            duplicate_files,
+            total_original_bytes,
+            total_stored_bytes,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -402,10 +507,31 @@ mod tests {
         }
     }
 
+    fn sample_dir(modified: i64) -> DirMetadata {
+        DirMetadata {
+            child_count: 1,
+            modified,
+        }
+    }
+
+    fn serialized_file(db: &MetadataDb, path: &str) -> Option<Vec<u8>> {
+        db.get_file(path)
+            .unwrap()
+            .map(|meta| bincode::serialize(&meta).unwrap())
+    }
+
+    fn serialized_entries(db: &MetadataDb, path: &str) -> Vec<Vec<u8>> {
+        db.list_dir(path)
+            .unwrap()
+            .into_iter()
+            .map(|entry| bincode::serialize(&entry).unwrap())
+            .collect()
+    }
+
     #[test]
     fn insert_and_get_file() {
         let (_tmp, db) = test_db();
-        let meta = sample_meta(b"fakecid");
+        let meta = sample_meta(&b"fakecid"[..]);
         db.insert_file("/docs/readme.txt", &meta, "bafk_fake_cid")
             .unwrap();
 
@@ -417,7 +543,7 @@ mod tests {
     #[test]
     fn list_dir_returns_children() {
         let (_tmp, db) = test_db();
-        let meta = sample_meta(b"cid1");
+        let meta = sample_meta(&b"cid1"[..]);
         db.insert_file("/docs/readme.txt", &meta, "cid1").unwrap();
         db.insert_file("/docs/license.md", &meta, "cid1").unwrap();
         db.insert_file("/docs/sub/deep.txt", &meta, "cid1").unwrap();
@@ -435,7 +561,7 @@ mod tests {
     #[test]
     fn find_duplicates_works() {
         let (_tmp, db) = test_db();
-        let meta = sample_meta(b"same_cid");
+        let meta = sample_meta(&b"same_cid"[..]);
         db.insert_file("/a/file1.txt", &meta, "same_cid_str")
             .unwrap();
         db.insert_file("/b/file2.txt", &meta, "same_cid_str")
@@ -452,5 +578,109 @@ mod tests {
         let (_tmp, db) = test_db();
         let result = db.get_file("/nonexistent").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn write_batch_matches_individual_inserts() {
+        let (_tmp_individual, individual) = test_db();
+        let (_tmp_batch, batch) = test_db();
+        let files = vec![
+            (
+                "/docs/readme.txt".to_string(),
+                sample_meta(&b"same_cid"[..]),
+                "same_cid_str".to_string(),
+            ),
+            (
+                "/docs/license.md".to_string(),
+                sample_meta(&b"same_cid"[..]),
+                "same_cid_str".to_string(),
+            ),
+            (
+                "/docs/sub/deep.txt".to_string(),
+                sample_meta(&b"other_cid"[..]),
+                "other_cid_str".to_string(),
+            ),
+        ];
+        let dirs = vec![
+            ("/docs/empty".to_string(), sample_dir(1700000001)),
+            ("/docs/sub".to_string(), sample_dir(1700000002)),
+        ];
+
+        for (path, meta, cid_str) in &files {
+            individual.insert_file(path, meta, cid_str).unwrap();
+        }
+        for (path, meta) in &dirs {
+            individual.insert_dir(path, meta).unwrap();
+        }
+        batch.write_batch(&files, &dirs, true).unwrap();
+
+        for (path, _meta, _cid_str) in &files {
+            assert_eq!(
+                serialized_file(&batch, path),
+                serialized_file(&individual, path)
+            );
+        }
+        assert_eq!(
+            serialized_entries(&batch, "/docs"),
+            serialized_entries(&individual, "/docs")
+        );
+        assert_eq!(
+            batch.find_duplicates("same_cid_str").unwrap(),
+            individual.find_duplicates("same_cid_str").unwrap()
+        );
+    }
+
+    #[test]
+    fn write_batch_empty_is_noop() {
+        let (_tmp, db) = test_db();
+        let meta = sample_meta(&b"cid1"[..]);
+        db.insert_file("/docs/readme.txt", &meta, "cid1").unwrap();
+        let before_file = serialized_file(&db, "/docs/readme.txt");
+        let before_entries = serialized_entries(&db, "/docs");
+        let before_dups = db.find_duplicates("cid1").unwrap();
+
+        let empty_files: Vec<(String, FileMetadata, String)> = Vec::new();
+        let empty_dirs: Vec<(String, DirMetadata)> = Vec::new();
+        db.write_batch(&empty_files, &empty_dirs, true).unwrap();
+
+        assert_eq!(serialized_file(&db, "/docs/readme.txt"), before_file);
+        assert_eq!(serialized_entries(&db, "/docs"), before_entries);
+        assert_eq!(db.find_duplicates("cid1").unwrap(), before_dups);
+    }
+
+    #[test]
+    fn write_batch_non_durable_then_durable_is_readable() {
+        let (_tmp, db) = test_db();
+        let non_durable_files = vec![(
+            "/docs/non_durable.txt".to_string(),
+            sample_meta(&b"non_durable_cid"[..]),
+            "non_durable_cid_str".to_string(),
+        )];
+        let non_durable_dirs = vec![("/docs/non_durable_dir".to_string(), sample_dir(1700000003))];
+        let durable_files = vec![(
+            "/docs/durable.txt".to_string(),
+            sample_meta(&b"durable_cid"[..]),
+            "durable_cid_str".to_string(),
+        )];
+        let durable_dirs = vec![("/docs/durable_dir".to_string(), sample_dir(1700000004))];
+
+        db.write_batch(&non_durable_files, &non_durable_dirs, false)
+            .unwrap();
+        db.write_batch(&durable_files, &durable_dirs, true).unwrap();
+
+        assert!(db.get_file("/docs/non_durable.txt").unwrap().is_some());
+        assert!(db.get_file("/docs/durable.txt").unwrap().is_some());
+        let names: Vec<String> = db
+            .list_dir("/docs")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert!(names.contains(&"non_durable_dir".to_string()));
+        assert!(names.contains(&"durable_dir".to_string()));
+        assert_eq!(
+            db.find_duplicates("non_durable_cid_str").unwrap(),
+            vec!["/docs/non_durable.txt".to_string()]
+        );
     }
 }
