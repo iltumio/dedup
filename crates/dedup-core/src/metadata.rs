@@ -181,8 +181,8 @@ impl MetadataDb {
 
     /// List immediate children of a directory.
     ///
-    /// Uses prefix range scan on the paths table and dirs table to find
-    /// entries whose path starts with `dir_path/`.
+    /// Uses prefix range scans, seeking past descendants of each child so
+    /// listing a parent does not traverse its entire subtree.
     pub fn list_dir(&self, dir_path: &str) -> Result<Vec<DirEntry>> {
         let prefix = if dir_path == "/" || dir_path.is_empty() {
             "/".to_string()
@@ -198,8 +198,8 @@ impl MetadataDb {
         let mut seen = std::collections::HashSet::new();
 
         // Scan files
-        let range = paths_table.range::<&str>(prefix.as_str()..)?;
-        for item in range {
+        let mut range = paths_table.range::<&str>(prefix.as_str()..)?;
+        while let Some(item) = range.next() {
             let (key, value) = item?;
             let key_str = key.value();
 
@@ -221,6 +221,11 @@ impl MetadataDb {
                         modified: 0,
                     });
                 }
+                // '/' is immediately followed by '0' in UTF-8 byte order.
+                // Seeking to "<child>0" skips exactly "<child>/...", while
+                // retaining siblings such as "<child>0" and "<child>other".
+                let after_subtree = format!("{prefix}{dir_name}0");
+                range = paths_table.range::<&str>(after_subtree.as_str()..)?;
             } else if !remainder.is_empty() {
                 // Direct child file
                 let meta: FileMetadata = bincode::deserialize(value.value())
@@ -237,8 +242,8 @@ impl MetadataDb {
         }
 
         // Also scan dirs table for directories that might have no files yet
-        let dir_range = dirs_table.range::<&str>(prefix.as_str()..)?;
-        for item in dir_range {
+        let mut dir_range = dirs_table.range::<&str>(prefix.as_str()..)?;
+        while let Some(item) = dir_range.next() {
             let (key, value) = item?;
             let key_str = key.value();
 
@@ -247,11 +252,13 @@ impl MetadataDb {
             }
 
             let remainder = &key_str[prefix.len()..];
+            if let Some(slash_pos) = remainder.find('/') {
+                let after_subtree = format!("{}{}0", prefix, &remainder[..slash_pos]);
+                dir_range = dirs_table.range::<&str>(after_subtree.as_str()..)?;
+                continue;
+            }
             // Only immediate children (no further slashes)
-            if !remainder.contains('/')
-                && !remainder.is_empty()
-                && seen.insert(remainder.to_string())
-            {
+            if !remainder.is_empty() && seen.insert(remainder.to_string()) {
                 let dir_meta: DirMetadata = bincode::deserialize(value.value())
                     .context("failed to deserialize DirMetadata")?;
                 entries.push(DirEntry {
@@ -556,6 +563,86 @@ mod tests {
         assert!(names.contains(&"license.md"));
         assert!(names.contains(&"sub")); // subdirectory
         assert!(!names.contains(&"file.txt")); // different dir
+    }
+
+    #[test]
+    fn list_dir_subtree_seeks_preserve_siblings_and_empty_directories() {
+        let (_tmp, db) = test_db();
+        let meta = sample_meta(b"cid");
+        let files = [
+            "/docs/a/deep/one",
+            "/docs/a/deep/two",
+            "/docs/a-older",
+            "/docs/a.txt",
+            "/docs/a0",
+            "/docs/aa/nested",
+            "/docs/è/nested",
+            "/docs/è0",
+            "/docs/🦀/nested",
+            "/docs/🦀0",
+            "/docs0/outside",
+        ]
+        .map(|path| (path.to_string(), meta.clone(), "cid".to_string()));
+        let dirs = [
+            "/docs/empty",
+            "/docs/empty/deep",
+            "/docs/empty/deep/nested",
+            "/docs/empty0",
+            "/docs/empty0/deep",
+            "/docs/empty1",
+            "/docs0/outside",
+        ]
+        .map(|path| (path.to_string(), sample_dir(42)));
+        db.write_batch(&files, &dirs, true).unwrap();
+
+        for path in ["/docs", "/docs/"] {
+            let entries = db.list_dir(path).unwrap();
+            let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(
+                names,
+                [
+                    "a", "aa", "empty", "empty0", "empty1", "è", "🦀", "a-older", "a.txt", "a0",
+                    "è0", "🦀0"
+                ]
+            );
+            assert!(entries[..7].iter().all(|e| e.is_dir));
+            assert!(entries[7..].iter().all(|e| !e.is_dir && e.size == 1024));
+            assert_eq!(entries[2].modified, 42);
+        }
+        assert_eq!(serialized_entries(&db, ""), serialized_entries(&db, "/"));
+        assert!(db.list_dir("/missing").unwrap().is_empty());
+    }
+
+    #[test]
+    #[ignore = "performance benchmark; run explicitly with --ignored --nocapture"]
+    fn list_dir_large_subtree_latency() {
+        let (_tmp, db) = test_db();
+        let meta = sample_meta(b"cid");
+        let files: Vec<_> = (0..100_000)
+            .map(|i| {
+                (
+                    format!("/docs/nested/file-{i:06}"),
+                    meta.clone(),
+                    "cid".into(),
+                )
+            })
+            .collect();
+        let dirs: Vec<_> = (0..100_000)
+            .map(|i| (format!("/docs/nested/dir-{i:06}"), sample_dir(1)))
+            .collect();
+        db.write_batch(&files, &dirs, true).unwrap();
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            let entries = db.list_dir("/").unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].name, "docs");
+        }
+        let elapsed = start.elapsed();
+        eprintln!("20 root listings above 200,000 descendants: {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "root navigation is too slow: {elapsed:?}"
+        );
     }
 
     #[test]

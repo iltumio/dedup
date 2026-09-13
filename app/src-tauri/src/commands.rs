@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, MutexGuard,
 };
 
 use dedup_core::{
@@ -13,10 +13,11 @@ use tauri::{AppHandle, Emitter, State};
 use crate::workspace::{self, CustomScanRule, Workspace, WorkspacesConfig};
 
 /// Shared application state holding the current store and workspaces.
+#[derive(Clone)]
 pub struct AppState {
-    pub store: Mutex<Option<Store>>,
-    pub store_path: Mutex<PathBuf>,
-    pub workspaces: Mutex<WorkspacesConfig>,
+    pub store: Arc<Mutex<Option<Store>>>,
+    pub store_path: Arc<Mutex<PathBuf>>,
+    pub workspaces: Arc<Mutex<WorkspacesConfig>>,
     pub scan_cancelled: Arc<AtomicBool>,
     pub config_path: PathBuf,
 }
@@ -30,15 +31,27 @@ impl AppState {
             .unwrap_or_else(|| PathBuf::from(".store"));
 
         Self {
-            store: Mutex::new(None),
-            store_path: Mutex::new(initial_store_path),
-            workspaces: Mutex::new(config),
+            store: Arc::new(Mutex::new(None)),
+            store_path: Arc::new(Mutex::new(initial_store_path)),
+            workspaces: Arc::new(Mutex::new(config)),
             scan_cancelled: Arc::new(AtomicBool::new(false)),
             config_path,
         }
     }
 
-    fn ensure_store(&self) -> Result<(), String> {
+    /// Keep filesystem I/O and mutex waits off both the UI and async executor.
+    async fn run_blocking<T, F>(&self, operation: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Self) -> Result<T, String> + Send + 'static,
+    {
+        let state = self.clone();
+        tokio::task::spawn_blocking(move || operation(&state))
+            .await
+            .map_err(|e| format!("Background task failed: {e}"))?
+    }
+
+    fn ensure_store(&self) -> Result<MutexGuard<'_, Option<Store>>, String> {
         let mut store = self.store.lock().map_err(|e| e.to_string())?;
         if store.is_none() {
             let path = self.store_path.lock().map_err(|e| e.to_string())?;
@@ -46,7 +59,7 @@ impl AppState {
                 *store = Some(Store::open(&path).map_err(|e| e.to_string())?);
             }
         }
-        Ok(())
+        Ok(store)
     }
 
     fn save_config(&self) -> Result<(), String> {
@@ -76,98 +89,134 @@ impl AppState {
 }
 
 #[tauri::command]
-pub fn list_dir(state: State<'_, AppState>, path: String) -> Result<Vec<DirEntry>, String> {
-    state.ensure_store()?;
-    let store_guard = state.store.lock().map_err(|e| e.to_string())?;
-    let store = store_guard
-        .as_ref()
-        .ok_or_else(|| "No store loaded. Scan a directory first.".to_string())?;
+pub async fn list_dir(state: State<'_, AppState>, path: String) -> Result<Vec<DirEntry>, String> {
+    state
+        .run_blocking(move |state| {
+            let store_guard = state.ensure_store()?;
+            let store = store_guard
+                .as_ref()
+                .ok_or_else(|| "No store loaded. Scan a directory first.".to_string())?;
 
-    store.list_dir(&path).map_err(|e| e.to_string())
+            store.list_dir(&path).map_err(|e| e.to_string())
+        })
+        .await
 }
 
 #[tauri::command]
-pub fn get_file_metadata(
+pub async fn get_file_metadata(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<Option<FileMetadata>, String> {
-    state.ensure_store()?;
-    let store_guard = state.store.lock().map_err(|e| e.to_string())?;
-    let store = store_guard
-        .as_ref()
-        .ok_or_else(|| "No store loaded.".to_string())?;
+    state
+        .run_blocking(move |state| {
+            let store_guard = state.ensure_store()?;
+            let store = store_guard
+                .as_ref()
+                .ok_or_else(|| "No store loaded.".to_string())?;
 
-    store.get_file(&path).map_err(|e| e.to_string())
+            store.get_file(&path).map_err(|e| e.to_string())
+        })
+        .await
 }
 
 #[tauri::command]
-pub fn read_file(state: State<'_, AppState>, path: String) -> Result<Vec<u8>, String> {
-    state.ensure_store()?;
-    let store_guard = state.store.lock().map_err(|e| e.to_string())?;
-    let store = store_guard
-        .as_ref()
-        .ok_or_else(|| "No store loaded.".to_string())?;
+pub async fn read_file(state: State<'_, AppState>, path: String) -> Result<Vec<u8>, String> {
+    state
+        .run_blocking(move |state| {
+            let store_guard = state.ensure_store()?;
+            let store = store_guard
+                .as_ref()
+                .ok_or_else(|| "No store loaded.".to_string())?;
 
-    store.read_file(&path).map_err(|e| e.to_string())
+            store.read_file(&path).map_err(|e| e.to_string())
+        })
+        .await
 }
 
 #[tauri::command]
-pub fn open_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    state.ensure_store()?;
-    let store_guard = state.store.lock().map_err(|e| e.to_string())?;
-    let store = store_guard
-        .as_ref()
-        .ok_or_else(|| "No store loaded.".to_string())?;
-
-    let data = store.read_file(&path).map_err(|e| e.to_string())?;
-
-    // Extract the original filename from the virtual path
-    let filename = path.rsplit('/').next().unwrap_or("file");
-
-    // Write to a temp file preserving the original name so the OS picks the right app
-    let tmp_dir = std::env::temp_dir().join("dedup-preview");
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
-    let tmp_path = tmp_dir.join(filename);
-    std::fs::write(&tmp_path, &data).map_err(|e| e.to_string())?;
-
-    open::that(&tmp_path).map_err(|e| e.to_string())?;
-
-    Ok(())
+pub async fn can_open_file(path: String) -> Result<Option<bool>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::file_open::can_open(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub fn find_duplicates(state: State<'_, AppState>, path: String) -> Result<Vec<String>, String> {
-    state.ensure_store()?;
-    let store_guard = state.store.lock().map_err(|e| e.to_string())?;
-    let store = store_guard
-        .as_ref()
-        .ok_or_else(|| "No store loaded.".to_string())?;
+pub async fn open_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    state
+        .run_blocking(move |state| {
+            let store_guard = state.ensure_store()?;
+            let store = store_guard
+                .as_ref()
+                .ok_or_else(|| "No store loaded.".to_string())?;
 
-    store.find_duplicates(&path).map_err(|e| e.to_string())
+            let data = store.read_file(&path).map_err(|e| e.to_string())?;
+            drop(store_guard);
+
+            // Extract the original filename from the virtual path
+            let filename = path.rsplit('/').next().unwrap_or("file");
+
+            // Write to a temp file preserving the original name so the OS picks the right app
+            let tmp_dir = std::env::temp_dir().join("dedup-preview");
+            std::fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+            let tmp_path = tmp_dir.join(filename);
+            std::fs::write(&tmp_path, &data).map_err(|e| e.to_string())?;
+
+            crate::file_open::launch(&tmp_path)?;
+
+            Ok(())
+        })
+        .await
 }
 
 #[tauri::command]
-pub fn find_all_duplicates(
+pub async fn find_duplicates(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Vec<String>, String> {
+    state
+        .run_blocking(move |state| {
+            let store_guard = state.ensure_store()?;
+            let store = store_guard
+                .as_ref()
+                .ok_or_else(|| "No store loaded.".to_string())?;
+
+            store.find_duplicates(&path).map_err(|e| e.to_string())
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn find_all_duplicates(
     state: State<'_, AppState>,
 ) -> Result<Vec<(String, Vec<String>)>, String> {
-    state.ensure_store()?;
-    let store_guard = state.store.lock().map_err(|e| e.to_string())?;
-    let store = store_guard
-        .as_ref()
-        .ok_or_else(|| "No store loaded.".to_string())?;
+    state
+        .run_blocking(move |state| {
+            let store_guard = state.ensure_store()?;
+            let store = store_guard
+                .as_ref()
+                .ok_or_else(|| "No store loaded.".to_string())?;
 
-    store.find_all_duplicates().map_err(|e| e.to_string())
+            store.find_all_duplicates().map_err(|e| e.to_string())
+        })
+        .await
 }
 
 #[tauri::command]
-pub fn get_extension_stats(state: State<'_, AppState>) -> Result<Vec<ExtensionStats>, String> {
-    state.ensure_store()?;
-    let store_guard = state.store.lock().map_err(|e| e.to_string())?;
-    let store = store_guard
-        .as_ref()
-        .ok_or_else(|| "No store loaded.".to_string())?;
+pub async fn get_extension_stats(
+    state: State<'_, AppState>,
+) -> Result<Vec<ExtensionStats>, String> {
+    state
+        .run_blocking(move |state| {
+            let store_guard = state.ensure_store()?;
+            let store = store_guard
+                .as_ref()
+                .ok_or_else(|| "No store loaded.".to_string())?;
 
-    store.extension_stats().map_err(|e| e.to_string())
+            store.extension_stats().map_err(|e| e.to_string())
+        })
+        .await
 }
 
 /// Scan a source directory into the active workspace's store.
@@ -363,36 +412,38 @@ pub fn create_workspace(
 }
 
 #[tauri::command]
-pub fn switch_workspace(
+pub async fn switch_workspace(
     state: State<'_, AppState>,
     workspace_id: String,
 ) -> Result<Workspace, String> {
-    let ws = {
-        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
-        let ws = config
-            .find(&workspace_id)
-            .cloned()
-            .ok_or_else(|| format!("Workspace not found: {workspace_id}"))?;
-        config.active_workspace_id = Some(workspace_id);
-        ws
-    };
+    state
+        .run_blocking(move |state| {
+            let ws = {
+                let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+                let ws = config
+                    .find(&workspace_id)
+                    .cloned()
+                    .ok_or_else(|| format!("Workspace not found: {workspace_id}"))?;
+                config.active_workspace_id = Some(workspace_id);
+                ws
+            };
 
-    state.save_config()?;
+            state.save_config()?;
 
-    // Close current store and switch to the new workspace's store path
-    {
-        let mut store_guard = state.store.lock().map_err(|e| e.to_string())?;
-        *store_guard = None;
-    }
-    {
-        let mut sp = state.store_path.lock().map_err(|e| e.to_string())?;
-        *sp = PathBuf::from(&ws.store_path);
-    }
+            // Close current store and switch to the new workspace's store path
+            {
+                let mut store_guard = state.store.lock().map_err(|e| e.to_string())?;
+                let mut sp = state.store_path.lock().map_err(|e| e.to_string())?;
+                *store_guard = None;
+                *sp = PathBuf::from(&ws.store_path);
+            }
 
-    // Try to open the store (it may not exist yet if nothing has been scanned)
-    state.ensure_store().ok();
+            // Try to open the store (it may not exist yet if nothing has been scanned)
+            state.ensure_store().ok();
 
-    Ok(ws)
+            Ok(ws)
+        })
+        .await
 }
 
 #[tauri::command]
@@ -443,99 +494,239 @@ pub fn import_workspaces(
 }
 
 #[tauri::command]
-pub fn import_workspace(
+pub async fn import_workspace(
     state: State<'_, AppState>,
     store_path: String,
     label: String,
 ) -> Result<Workspace, String> {
-    let path = PathBuf::from(&store_path);
+    state
+        .run_blocking(move |state| {
+            let path = PathBuf::from(&store_path);
 
-    // If the user selected a metadata.redb file, use its parent directory
-    let store_dir = if path.is_file()
-        && path
-            .file_name()
-            .map(|n| n == "metadata.redb")
-            .unwrap_or(false)
-    {
-        path.parent()
-            .ok_or_else(|| "Cannot determine store directory from file path".to_string())?
-            .to_path_buf()
-    } else {
-        path
-    };
+            // If the user selected a metadata.redb file, use its parent directory
+            let store_dir = if path.is_file()
+                && path
+                    .file_name()
+                    .map(|n| n == "metadata.redb")
+                    .unwrap_or(false)
+            {
+                path.parent()
+                    .ok_or_else(|| "Cannot determine store directory from file path".to_string())?
+                    .to_path_buf()
+            } else {
+                path
+            };
 
-    // Validate the store directory exists and has the expected structure
-    let metadata_path = store_dir.join("metadata.redb");
-    if !metadata_path.exists() {
-        return Err(format!(
-            "Invalid store directory: metadata.redb not found in {}",
-            store_dir.display()
-        ));
-    }
+            // Validate the store directory exists and has the expected structure
+            let metadata_path = store_dir.join("metadata.redb");
+            if !metadata_path.exists() {
+                return Err(format!(
+                    "Invalid store directory: metadata.redb not found in {}",
+                    store_dir.display()
+                ));
+            }
 
-    // Check that a workspace with this store path doesn't already exist
-    let store_dir_str = store_dir.to_string_lossy().to_string();
-    {
-        let config = state.workspaces.lock().map_err(|e| e.to_string())?;
-        if config
-            .workspaces
-            .iter()
-            .any(|w| w.store_path == store_dir_str)
-        {
-            return Err("A workspace with this store path already exists.".to_string());
-        }
-    }
+            // Check that a workspace with this store path doesn't already exist
+            let store_dir_str = store_dir.to_string_lossy().to_string();
+            {
+                let config = state.workspaces.lock().map_err(|e| e.to_string())?;
+                if config
+                    .workspaces
+                    .iter()
+                    .any(|w| w.store_path == store_dir_str)
+                {
+                    return Err("A workspace with this store path already exists.".to_string());
+                }
+            }
 
-    // Open the store to compute stats
-    let store = Store::open(&store_dir).map_err(|e| e.to_string())?;
-    let (
-        total_files,
-        total_dirs,
-        unique_blobs,
-        duplicate_files,
-        total_original_bytes,
-        total_stored_bytes,
-    ) = store.compute_stats().map_err(|e| e.to_string())?;
+            // Open the store to compute stats
+            let store = Store::open(&store_dir).map_err(|e| e.to_string())?;
+            let (
+                total_files,
+                total_dirs,
+                unique_blobs,
+                duplicate_files,
+                total_original_bytes,
+                total_stored_bytes,
+            ) = store.compute_stats().map_err(|e| e.to_string())?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
 
-    let ws = Workspace {
-        id: workspace::generate_id(),
-        label,
-        tags: vec!["imported".to_string()],
-        store_path: store_dir_str,
-        created_at: now,
-        stats: workspace::WorkspaceStats {
-            total_files,
-            total_dirs,
-            unique_blobs,
-            duplicate_files,
-            total_original_bytes,
-            total_stored_bytes,
-            scans_count: 0,
-            last_scan_at: 0,
-        },
-    };
+            let ws = Workspace {
+                id: workspace::generate_id(),
+                label,
+                tags: vec!["imported".to_string()],
+                store_path: store_dir_str,
+                created_at: now,
+                stats: workspace::WorkspaceStats {
+                    total_files,
+                    total_dirs,
+                    unique_blobs,
+                    duplicate_files,
+                    total_original_bytes,
+                    total_stored_bytes,
+                    scans_count: 0,
+                    last_scan_at: 0,
+                },
+            };
 
-    {
-        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
-        config.workspaces.push(ws.clone());
-        // Auto-activate if it's the only workspace
-        if config.workspaces.len() == 1 {
-            config.active_workspace_id = Some(ws.id.clone());
-        }
-    }
+            {
+                let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+                config.workspaces.push(ws.clone());
+                // Auto-activate if it's the only workspace
+                if config.workspaces.len() == 1 {
+                    config.active_workspace_id = Some(ws.id.clone());
+                }
+            }
 
-    state.save_config()?;
-    Ok(ws)
+            state.save_config()?;
+            Ok(ws)
+        })
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_commands_do_not_block_ipc_dispatch() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        use tauri::{ipc::CallbackFn, test, webview::InvokeRequest, Manager};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(tmp.path().join("workspaces.json"));
+        *state.store_path.lock().unwrap() = tmp.path().join("missing-store");
+        state.workspaces.lock().unwrap().workspaces.push(Workspace {
+            id: "test".into(),
+            label: "Test".into(),
+            tags: vec![],
+            store_path: tmp.path().join("missing-store").to_string_lossy().into(),
+            created_at: 0,
+            stats: Default::default(),
+        });
+        let import_path = tmp.path().join("import-store");
+        drop(Store::open(&import_path).unwrap());
+        let app = test::mock_builder()
+            .manage(state)
+            .invoke_handler(tauri::generate_handler![
+                list_dir,
+                get_file_metadata,
+                read_file,
+                open_file,
+                find_duplicates,
+                find_all_duplicates,
+                get_extension_stats,
+                switch_workspace,
+                import_workspace,
+            ])
+            .build(test::mock_context(test::noop_assets()))
+            .unwrap();
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+
+        for command in [
+            "list_dir",
+            "get_file_metadata",
+            "read_file",
+            "open_file",
+            "find_duplicates",
+            "find_all_duplicates",
+            "get_extension_stats",
+            "switch_workspace",
+            "import_workspace",
+        ] {
+            // Hold the actual store lock until IPC dispatch yields. The timeout
+            // releases it even on the broken synchronous path, avoiding a hang.
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let handle = app.handle().clone();
+            let holder = std::thread::spawn(move || {
+                let state = handle.state::<AppState>();
+                if command == "import_workspace" {
+                    let _guard = state.workspaces.lock().unwrap();
+                    ready_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(2)).is_ok()
+                } else {
+                    let _guard = state.store.lock().unwrap();
+                    ready_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(2)).is_ok()
+                }
+            });
+            ready_rx.recv().unwrap();
+            let (response_tx, response_rx) = mpsc::channel();
+            let start = Instant::now();
+            window.as_ref().clone().on_message(
+                InvokeRequest {
+                    cmd: command.into(),
+                    callback: CallbackFn(0),
+                    error: CallbackFn(1),
+                    url: "http://tauri.localhost".parse().unwrap(),
+                    body: serde_json::json!({
+                        "path": "/", "workspaceId": "test",
+                        "storePath": import_path, "label": "Imported"
+                    })
+                    .into(),
+                    headers: Default::default(),
+                    invoke_key: test::INVOKE_KEY.into(),
+                },
+                Box::new(move |_, _, response, _, _| {
+                    response_tx.send(response).unwrap();
+                }),
+            );
+            let elapsed = start.elapsed();
+            let _ = release_tx.send(());
+            let dispatched_before_release = holder.join().unwrap();
+            let response = response_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if command == "switch_workspace" || command == "import_workspace" {
+                assert!(matches!(response, tauri::ipc::InvokeResponse::Ok(_)));
+            } else {
+                let tauri::ipc::InvokeResponse::Err(error) = response else {
+                    panic!("expected a missing store error from {command}");
+                };
+                assert!(error.0.as_str().unwrap().contains("No store loaded"));
+            }
+            eprintln!("{command}: IPC dispatch took {elapsed:?}");
+            assert!(
+                dispatched_before_release,
+                "{command} blocked IPC dispatch while waiting for the store ({elapsed:?})"
+            );
+        }
+
+        // A worker must update the shared cache/config, not a detached copy.
+        let state = app.state::<AppState>();
+        assert_eq!(
+            state
+                .workspaces
+                .lock()
+                .unwrap()
+                .active_workspace_id
+                .as_deref(),
+            Some("test")
+        );
+        assert_eq!(state.workspaces.lock().unwrap().workspaces.len(), 2);
+        *state.store_path.lock().unwrap() = import_path;
+        let response = test::get_ipc_response(
+            &window,
+            InvokeRequest {
+                cmd: "list_dir".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "http://tauri.localhost".parse().unwrap(),
+                body: serde_json::json!({ "path": "/" }).into(),
+                headers: Default::default(),
+                invoke_key: test::INVOKE_KEY.into(),
+            },
+        )
+        .unwrap();
+        assert!(response.deserialize::<Vec<DirEntry>>().unwrap().is_empty());
+        assert!(state.store.lock().unwrap().is_some());
+    }
 
     fn custom_rule(id: &str, label: &str, pattern: &str) -> CustomScanRule {
         CustomScanRule {

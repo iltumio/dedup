@@ -1,25 +1,40 @@
 <script lang="ts">
-	import type { Snippet } from 'svelte';
-
-	interface Props {
-		label: string;
-		hint?: string;
-		error?: string | null;
-		children?: Snippet;
-	}
-
-	let { label, hint, error = null, children }: Props = $props();
+  import type { Snippet } from "svelte";
+  let {
+    label,
+    hint,
+    error = null,
+    children,
+  }: {
+    label: string;
+    hint?: string;
+    error?: string | null;
+    children?: Snippet;
+  } = $props();
+  const id = $props.id();
+  let field: HTMLDivElement;
+  let controlId = $state("");
+  $effect(() => {
+    const described = [hint ? `${id}-hint` : "", error ? `${id}-error` : ""]
+      .filter(Boolean)
+      .join(" ");
+    const control = field?.querySelector(
+      'input:not([type="hidden"]), select, textarea, button[data-select-trigger]',
+    );
+    if (control) {
+      if (!control.id) control.id = id;
+      controlId = control.id;
+      control.setAttribute("aria-describedby", described);
+      control.setAttribute("aria-invalid", String(Boolean(error)));
+    }
+  });
 </script>
 
-<label class="form-control w-full gap-1">
-	<span class="label py-0">
-		<span class="label-text text-xs font-medium text-base-content/70">{label}</span>
-	</span>
-	{@render children?.()}
-	{#if hint}
-		<span class="text-[11px] leading-4 text-base-content/50">{hint}</span>
-	{/if}
-	{#if error}
-		<span class="text-xs text-error">{error}</span>
-	{/if}
-</label>
+<div class="field" bind:this={field}>
+  <label for={controlId || id}>{label}</label
+  >{@render children?.()}{#if hint}<span id={`${id}-hint`} class="field-hint"
+      >{hint}</span
+    >{/if}{#if error}<span id={`${id}-error`} class="text-sm text-error"
+      >{error}</span
+    >{/if}
+</div>

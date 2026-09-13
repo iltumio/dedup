@@ -14,9 +14,18 @@ tokio = { version = "1", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-open = "5.3.3"
 dirs = "6.0.0"
 regex = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gio = "0.18"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+open = "5.3.3"
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+tempfile = "3"
 
 [features]
 default = ["custom-protocol"]

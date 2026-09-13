@@ -1,80 +1,91 @@
 <script lang="ts">
-	import type { Snippet } from 'svelte';
-	import { UiButton, UiSegmentedControl, UiStat } from '$lib/components/ui';
-
-	type View = 'files' | 'stats';
-
-	interface ShellStat {
-		label: string;
-		value: string | number;
-		tone?: 'default' | 'success' | 'error' | 'info' | 'warning';
-	}
-
-	interface Props {
-		currentView: View;
-		hasWorkspace: boolean;
-		scanning: boolean;
-		stats: ShellStat[];
-		onViewChange: (view: View) => void;
-		onScan: () => void;
-		workspaceControl?: Snippet;
-		children?: Snippet;
-	}
-
-	let {
-		currentView,
-		hasWorkspace,
-		scanning,
-		stats,
-		onViewChange,
-		onScan,
-		workspaceControl,
-		children
-	}: Props = $props();
+  import UiSelect from "./ui/UiSelect.svelte";
+  import type { Snippet } from "svelte";
+  import Icon from "./ui/Icon.svelte";
+  import { app } from "$lib/state/app.svelte";
+  export type View = "files" | "duplicates" | "activity" | "stats";
+  let {
+    currentView,
+    hasWorkspace,
+    scanning,
+    onViewChange,
+    onScan,
+    workspaceControl,
+    children,
+  }: {
+    currentView: View;
+    hasWorkspace: boolean;
+    scanning: boolean;
+    onViewChange: (view: View) => void;
+    onScan: () => void;
+    workspaceControl?: Snippet;
+    children?: Snippet;
+  } = $props();
+  const views: { id: View; label: string; icon: string }[] = [
+    { id: "files", label: "Files", icon: "folder" },
+    { id: "duplicates", label: "Duplicates", icon: "copies" },
+    { id: "activity", label: "Activity", icon: "activity" },
+    { id: "stats", label: "Overview", icon: "chart" },
+  ];
 </script>
 
-<div class="flex h-screen min-h-0 flex-col bg-base-100 text-base-content" data-theme="night">
-	<header class="flex min-h-12 shrink-0 items-center gap-3 border-b border-base-300 bg-base-200 px-3">
-		<h1 class="shrink-0 text-sm font-bold">dedup</h1>
-
-		<div class="min-w-0 max-w-72 flex-1">{@render workspaceControl?.()}</div>
-
-		{#if hasWorkspace}
-			<div class="shrink-0">
-				<UiSegmentedControl
-					ariaLabel="Primary view"
-					value={currentView}
-					options={[
-						{ value: 'files', label: 'Files' },
-						{ value: 'stats', label: 'Stats' }
-					]}
-					onChange={onViewChange}
-				/>
-			</div>
-		{/if}
-
-		<div class="min-w-0 flex-1"></div>
-
-		{#if stats.length > 0}
-			<div class="hidden min-w-0 shrink grid-cols-3 gap-2 lg:grid">
-				{#each stats as stat}
-					<UiStat label={stat.label} value={stat.value} tone={stat.tone} />
-				{/each}
-			</div>
-		{/if}
-
-		<UiButton
-			class="shrink-0"
-			variant="primary"
-			disabled={!hasWorkspace || scanning}
-			loading={scanning}
-			onclick={onScan}
-		>
-			Scan
-		</UiButton>
-	</header>
-
-	<main class="flex min-h-0 flex-1 overflow-hidden">
-		{@render children?.()}
-	</main>
+<div class="app-shell">
+  <aside class="app-sidebar">
+    <a class="brand" href="/" aria-label="dedup home"
+      ><span class="brand-mark"><Icon name="copies" /></span>dedup<span
+        class="brand-dot">.</span
+      ></a
+    >
+    <div class="sidebar-label">YOUR ARCHIVE</div>
+    {@render workspaceControl?.()}
+    <nav aria-label="Main navigation" class="app-nav">
+      {#each views as view}
+        <button
+          type="button"
+          class:active={currentView === view.id}
+          aria-current={currentView === view.id ? "page" : undefined}
+          disabled={!hasWorkspace || (scanning && view.id !== "activity")}
+          onclick={() => onViewChange(view.id)}
+          ><Icon
+            name={view.icon}
+          />{view.label}{#if view.id === "activity" && scanning}<span
+              class="live-dot"
+            ></span>{/if}</button
+        >
+      {/each}
+    </nav>
+    <div class="sidebar-bottom">
+      <p>One content.<br />Every file, preserved.</p>
+      <div class="theme-control">
+        Appearance<UiSelect
+          label="Appearance"
+          value={app.theme}
+          onValueChange={(value) =>
+            app.setTheme(value as "system" | "light" | "dark")}
+          options={[
+            { value: "system", label: "System" },
+            { value: "light", label: "Light" },
+            { value: "dark", label: "Dark" },
+          ]}
+        />
+      </div>
+    </div>
+  </aside>
+  <div class="app-content">
+    <header class="app-toolbar">
+      <div>
+        <span class="eyebrow"
+          >{app.activeWorkspace?.label ?? "GET STARTED"}</span
+        >
+        <h1>{views.find((v) => v.id === currentView)?.label ?? "Files"}</h1>
+      </div>
+      <button
+        type="button"
+        class="btn btn-primary"
+        disabled={!hasWorkspace || scanning}
+        onclick={onScan}><Icon name="plus" size={18} />Add folder</button
+      >
+    </header>
+    <main class="app-main">{@render children?.()}</main>
+  </div>
 </div>

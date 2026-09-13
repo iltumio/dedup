@@ -31,7 +31,7 @@
 			/>
 			<span class="min-w-0">
 				<span class="block text-sm font-medium">{preset.label}</span>
-				<span class="block text-xs leading-5 text-base-content/60">{preset.description}</span>
+				<span class="block text-xs leading-5 muted">{preset.description}</span>
 			</span>
 		</label>
 	{/each}

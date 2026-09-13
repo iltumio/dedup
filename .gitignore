@@ -16,3 +16,7 @@ app/build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Browser test artifacts
+app/test-results/
+app/playwright-report/

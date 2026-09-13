@@ -71,6 +71,10 @@ export async function readFile(path: string): Promise<number[]> {
 	return invoke('read_file', { path });
 }
 
+export async function canOpenFile(path: string): Promise<boolean | null> {
+    return invoke('can_open_file', { path });
+}
+
 export async function openFile(path: string): Promise<void> {
 	return invoke('open_file', { path });
 }

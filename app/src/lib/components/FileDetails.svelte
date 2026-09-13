@@ -1,215 +1,272 @@
 <script lang="ts">
-	import {
-		getFileMetadata,
-		findDuplicates,
-		readFile,
-		openFile,
-		formatSize,
-		formatTimestamp,
-		type FileMetadata,
-		type DirEntry
-	} from '$lib/api/tauri';
-
-	interface Props {
-		path: string;
-		entry: DirEntry;
-	}
-
-	let { path, entry }: Props = $props();
-
-	let metadata = $state<FileMetadata | null>(null);
-	let duplicates = $state<string[]>([]);
-	let cidString = $state('');
-	let loading = $state(false);
-	let previewUrl = $state<string | null>(null);
-
-	const IMAGE_EXTENSIONS = new Set([
-		'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg', 'avif', 'tiff', 'tif'
-	]);
-
-	function getExtension(name: string): string {
-		const dot = name.lastIndexOf('.');
-		if (dot === -1) return '';
-		return name.slice(dot + 1).toLowerCase();
-	}
-
-	function getMimeType(ext: string): string {
-		const map: Record<string, string> = {
-			png: 'image/png',
-			jpg: 'image/jpeg',
-			jpeg: 'image/jpeg',
-			gif: 'image/gif',
-			webp: 'image/webp',
-			bmp: 'image/bmp',
-			ico: 'image/x-icon',
-			svg: 'image/svg+xml',
-			avif: 'image/avif',
-			tiff: 'image/tiff',
-			tif: 'image/tiff'
-		};
-		return map[ext] ?? 'application/octet-stream';
-	}
-
-	let isImage = $derived(IMAGE_EXTENSIONS.has(getExtension(entry.name)));
-
-	let opening = $state(false);
-
-	async function handleOpen() {
-		opening = true;
-		try {
-			await openFile(path);
-		} catch (e) {
-			console.error('Failed to open file:', e);
-		}
-		opening = false;
-	}
-
-	$effect(() => {
-		loadDetails(path);
-		return () => {
-			if (previewUrl) {
-				URL.revokeObjectURL(previewUrl);
-				previewUrl = null;
-			}
-		};
-	});
-
-	async function loadDetails(p: string) {
-		if (entry.is_dir) {
-			metadata = null;
-			duplicates = [];
-			previewUrl = null;
-			return;
-		}
-
-		loading = true;
-		try {
-			metadata = await getFileMetadata(p);
-			duplicates = await findDuplicates(p);
-
-			// Convert CID bytes to hex for display
-			if (metadata?.cid) {
-				cidString = metadata.cid.map((b) => b.toString(16).padStart(2, '0')).join('');
-				if (cidString.length > 24) {
-					cidString = cidString.slice(0, 12) + '...' + cidString.slice(-12);
-				}
-			}
-
-			// Load image preview
-			const ext = getExtension(entry.name);
-			if (IMAGE_EXTENSIONS.has(ext)) {
-				try {
-					const bytes = await readFile(p);
-					const blob = new Blob([new Uint8Array(bytes)], { type: getMimeType(ext) });
-					if (previewUrl) URL.revokeObjectURL(previewUrl);
-					previewUrl = URL.createObjectURL(blob);
-				} catch (e) {
-					console.error('Failed to load image preview:', e);
-					previewUrl = null;
-				}
-			} else {
-				previewUrl = null;
-			}
-		} catch (e) {
-			console.error('Failed to load details:', e);
-		}
-		loading = false;
-	}
+  import {
+    getFileMetadata,
+    findDuplicates,
+    readFile,
+    openFile,
+    canOpenFile,
+    formatSize,
+    formatTimestamp,
+    type FileMetadata,
+    type DirEntry,
+  } from "$lib/api/tauri";
+  import Icon from "./ui/Icon.svelte";
+  let {
+    path,
+    entry,
+    onClose,
+    onOpenPath,
+  }: {
+    path: string;
+    entry: DirEntry;
+    onClose?: () => void;
+    onOpenPath?: (path: string) => void;
+  } = $props();
+  let metadata = $state<FileMetadata | null>(null);
+  let duplicates = $state<string[]>([]);
+  let loading = $state(true);
+  let error = $state<string | null>(null);
+  let previewError = $state<string | null>(null);
+  let previewUrl = $state<string | null>(null);
+  let openSupported = $state<boolean | null>(null);
+  let checkingOpen = $state(true);
+  let opening = $state(false);
+  let actionMessage = $state("");
+  let retry = $state(0);
+  let pathLimit = $state(20);
+  const imageTypes: Record<string, string> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    bmp: "image/bmp",
+    avif: "image/avif",
+  };
+  const cid = $derived(
+    metadata?.cid.map((b) => b.toString(16).padStart(2, "0")).join("") ?? "",
+  );
+  $effect(() => {
+    const selected = path;
+    const isDir = entry.is_dir;
+    retry;
+    let active = true;
+    let objectUrl: string | null = null;
+    metadata = null;
+    duplicates = [];
+    previewUrl = null;
+    error = null;
+    previewError = null;
+    actionMessage = "";
+    pathLimit = 20;
+    loading = true;
+    (async () => {
+      try {
+        if (isDir) return;
+        const [meta, copies] = await Promise.all([
+          getFileMetadata(selected),
+          findDuplicates(selected),
+        ]);
+        if (!active) return;
+        metadata = meta;
+        duplicates = copies;
+        if (!meta) {
+          error = "This file is no longer available in the archive.";
+          return;
+        }
+        const mime = imageTypes[selected.split(".").pop()?.toLowerCase() ?? ""];
+        if (mime) {
+          if (meta.original_size > 12 * 1024 * 1024)
+            previewError =
+              "Preview skipped for this large image.";
+          else
+            try {
+              const bytes = await readFile(selected);
+              if (!active) return;
+              objectUrl = URL.createObjectURL(
+                new Blob([new Uint8Array(bytes)], { type: mime }),
+              );
+              previewUrl = objectUrl;
+            } catch {
+              if (active)
+                previewError =
+                  "Preview unavailable.";
+            }
+        }
+      } catch (e) {
+        if (active) error = String(e);
+      } finally {
+        if (active) loading = false;
+      }
+    })();
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  });
+  $effect(() => {
+    const selected = path;
+    const isDir = entry.is_dir;
+    retry;
+    let active = true;
+    openSupported = null;
+    checkingOpen = true;
+    if (!isDir) {
+      canOpenFile(selected)
+        .then((supported) => {
+          if (active) openSupported = supported;
+        })
+        .catch(() => {
+          /* An unavailable check does not mean unsupported. */
+        })
+        .finally(() => {
+          if (active) checkingOpen = false;
+        });
+    }
+    return () => {
+      active = false;
+    };
+  });
+  async function handleOpen() {
+    if (opening || checkingOpen || openSupported === false) return;
+    const selected = path;
+    opening = true;
+    actionMessage = "";
+    try {
+      await openFile(selected);
+    } catch (e) {
+      if (path === selected) actionMessage = `Could not open file: ${e}`;
+    } finally {
+      opening = false;
+    }
+  }
+  async function copy(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      actionMessage = "Copied to clipboard";
+    } catch {
+      actionMessage =
+        "Could not access the clipboard. Select the text to copy it manually.";
+    }
+  }
 </script>
 
-<div class="flex h-full min-h-0 flex-col">
-	<header class="flex h-10 shrink-0 items-center border-b border-base-300 px-4">
-		<span class="text-sm font-semibold">Details</span>
-	</header>
-
-	<div class="min-h-0 flex-1 overflow-y-auto p-4">
-		<div class="rounded-box border border-base-300 bg-base-200 p-3">
-			<div class="flex min-w-0 items-center gap-2">
-				<span class="text-sm">{entry.is_dir ? 'DIR' : 'FILE'}</span>
-				<span class="font-path min-w-0 flex-1 break-all text-sm">{path}</span>
-			</div>
-		</div>
-
-		{#if !entry.is_dir}
-			<button
-				class="btn btn-primary btn-sm mt-3 w-full"
-				type="button"
-				onclick={handleOpen}
-				disabled={opening}
-			>
-				{opening ? 'Opening...' : 'Open'}
-			</button>
-		{/if}
-
-		{#if isImage && previewUrl}
-			<div
-				class="rounded-box mt-4 flex min-h-28 items-center justify-center overflow-hidden border border-base-300 bg-base-200"
-			>
-				<img class="max-h-96 max-w-full object-contain" src={previewUrl} alt={entry.name} />
-			</div>
-		{:else if isImage && loading}
-			<div
-				class="rounded-box mt-4 flex h-28 items-center justify-center border border-base-300 bg-base-200 text-sm text-base-content/60"
-			>
-				Loading preview...
-			</div>
-		{/if}
-
-		{#if entry.is_dir}
-			<div class="mt-4 grid gap-2 sm:grid-cols-2">
-				<div class="rounded-box border border-base-300 bg-base-200 p-3">
-					<div class="text-xs text-base-content/50">Type</div>
-					<div class="mt-1 text-sm font-semibold">Directory</div>
-				</div>
-			</div>
-		{:else if loading}
-			<div class="mt-4 text-sm text-base-content/60">Loading...</div>
-		{:else if metadata}
-			<div class="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-				<div class="rounded-box border border-base-300 bg-base-200 p-3">
-					<div class="text-xs text-base-content/50">Size</div>
-					<div class="font-path mt-1 text-sm font-semibold">
-						{formatSize(metadata.original_size)}
-					</div>
-				</div>
-				<div class="rounded-box border border-base-300 bg-base-200 p-3">
-					<div class="text-xs text-base-content/50">Stored</div>
-					<div class="font-path mt-1 text-sm font-semibold">
-						{formatSize(metadata.compressed_size)}
-					</div>
-				</div>
-				{#if metadata.original_size > 0}
-					<div class="rounded-box border border-base-300 bg-base-200 p-3">
-						<div class="text-xs text-base-content/50">Ratio</div>
-						<div class="font-path mt-1 text-sm font-semibold">
-							{((metadata.compressed_size / metadata.original_size) * 100).toFixed(1)}%
-						</div>
-					</div>
-				{/if}
-				<div class="rounded-box border border-base-300 bg-base-200 p-3">
-					<div class="text-xs text-base-content/50">Modified</div>
-					<div class="font-path mt-1 text-sm font-semibold">
-						{formatTimestamp(metadata.modified)}
-					</div>
-				</div>
-				<div class="rounded-box border border-base-300 bg-base-200 p-3 sm:col-span-2">
-					<div class="text-xs text-base-content/50">CID</div>
-					<div class="font-path mt-1 break-all text-sm font-semibold">{cidString}</div>
-				</div>
-			</div>
-
-			{#if duplicates.length > 1}
-				<div class="alert alert-error mt-4 block">
-					<div class="text-sm font-semibold">{duplicates.length} copies of this file</div>
-					<ul class="font-path mt-2 min-w-0 space-y-1 break-all text-xs">
-						{#each duplicates as dup}
-							<li class={dup === path ? 'font-semibold text-error-content' : 'opacity-80'}>
-								{dup}
-							</li>
-						{/each}
-					</ul>
-				</div>
-			{/if}
-		{/if}
-	</div>
+<div class="file-inspector">
+  <header>
+    <span class="eyebrow">FILE DETAILS</span>{#if onClose}<button
+        class="icon-button"
+        type="button"
+        aria-label="Back to file list"
+        onclick={onClose}><Icon name="close" size={18} /></button
+      >{/if}
+  </header>
+  <div class="inspector-scroll">
+    <div class="inspector-file-icon">
+      <Icon name={entry.is_dir ? "folder" : "file"} size={32} />
+    </div>
+    <h2 class="inspector-name">{entry.name}</h2>
+    <button
+      class="inspector-path font-path"
+      type="button"
+      title="Copy archive path"
+      onclick={() => copy(path)}>{path}</button
+    >
+    {#if !entry.is_dir && !checkingOpen && openSupported !== false}<button
+        class="btn btn-primary mt-4"
+        type="button"
+        disabled={opening || loading}
+        onclick={handleOpen}
+        >{opening ? "Opening…" : "Open file"}<Icon
+          name="chevron"
+          size={16}
+        /></button
+      >{/if}
+    {#if !entry.is_dir && checkingOpen}<p
+        class="muted text-sm mt-3"
+        role="status"
+      >
+        Checking available applications…
+      </p>
+    {:else if !entry.is_dir && openSupported === false}<p
+        class="muted text-sm mt-3"
+      >
+        No default application is associated with this file type.
+      </p>{/if}
+    {#if actionMessage}<p class="notice mt-3" role="status">
+        {actionMessage}
+      </p>{/if}
+    {#if error}<div class="notice notice-error mt-4" role="alert">
+        <p>{error}</p>
+        <button class="btn btn-sm" type="button" onclick={() => retry++}
+          >Try again</button
+        >
+      </div>
+    {:else if loading}<div class="py-8 muted" role="status">
+        Loading file details…
+      </div>
+    {:else if metadata}
+      {#if previewUrl}<div class="image-preview">
+          <img
+            src={previewUrl}
+            alt={entry.name}
+            onerror={() => {
+              previewError = "This image format could not be displayed.";
+              previewUrl = null;
+            }}
+          />
+        </div>{/if}
+      {#if previewError}<p class="notice mt-4">{previewError}</p>{/if}
+      <dl class="metadata-list">
+        <div>
+          <dt>Original size</dt>
+          <dd>{formatSize(metadata.original_size)}</dd>
+        </div>
+        <div>
+          <dt>Stored content</dt>
+          <dd>{formatSize(metadata.compressed_size)}</dd>
+        </div>
+        <div>
+          <dt>Modified</dt>
+          <dd>{formatTimestamp(metadata.modified)}</dd>
+        </div>
+      </dl>
+      {#if duplicates.length > 1}<section class="inspector-copies">
+          <h3>
+            <Icon name="copies" size={18} />{duplicates.length} archived paths
+          </h3>
+          <p class="muted text-sm">These files share one stored content.</p>
+          <ul>
+            {#each duplicates.slice(0, pathLimit) as duplicate}<li>
+                <button
+                  class="path-link"
+                  type="button"
+                  disabled={duplicate === path || !onOpenPath}
+                  onclick={() => onOpenPath?.(duplicate)}
+                  ><span>{duplicate}</span>{#if duplicate === path}<span
+                      class="count-badge">Current</span
+                    >{:else}<Icon name="chevron" size={14} />{/if}</button
+                >
+              </li>{/each}
+          </ul>
+          {#if duplicates.length > pathLimit}<button
+              class="btn btn-sm"
+              type="button"
+              onclick={() => (pathLimit += 100)}>Show more paths</button
+            >{/if}
+        </section>{/if}
+      <details class="disclosure mt-5">
+        <summary>Technical details</summary>
+        <div class="detail-content">
+          <p class="eyebrow">CONTENT IDENTIFIER (HEX)</p>
+          <p class="font-path break-all text-xs my-2">{cid}</p>
+          <button class="btn btn-sm" type="button" onclick={() => copy(cid)}
+            >Copy identifier</button
+          >
+          <p class="muted text-sm mt-3">
+            Created: {formatTimestamp(metadata.created)}
+          </p>
+        </div>
+      </details>
+    {/if}
+  </div>
 </div>

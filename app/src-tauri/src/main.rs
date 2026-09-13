@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod file_open;
 mod workspace;
 
 use commands::AppState;
@@ -26,6 +27,7 @@ fn main() {
             commands::scan_directory,
             commands::cancel_scan,
             commands::open_file,
+            commands::can_open_file,
             commands::list_workspaces,
             commands::list_custom_scan_rules,
             commands::save_custom_scan_rules,
