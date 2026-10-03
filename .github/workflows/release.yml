@@ -210,8 +210,14 @@ jobs:
             install -Dm755 "${SRCDIR}/target/release/dedup-app" "\$pkgdir/usr/bin/dedup-app"
             install -Dm644 "${SRCDIR}/pkg/arch/dedup.desktop" "\$pkgdir/usr/share/applications/dedup.desktop"
             install -Dm644 "${SRCDIR}/app/src-tauri/icons/icon.png" "\$pkgdir/usr/share/icons/hicolor/512x512/apps/dedup.png"
+            install -Dm644 "${SRCDIR}/app/src-tauri/icons/128x128@2x.png" "\$pkgdir/usr/share/icons/hicolor/256x256/apps/dedup.png"
             install -Dm644 "${SRCDIR}/app/src-tauri/icons/128x128.png" "\$pkgdir/usr/share/icons/hicolor/128x128/apps/dedup.png"
+            install -Dm644 "${SRCDIR}/app/src-tauri/icons/64x64.png" "\$pkgdir/usr/share/icons/hicolor/64x64/apps/dedup.png"
+            install -Dm644 "${SRCDIR}/app/src-tauri/icons/48x48.png" "\$pkgdir/usr/share/icons/hicolor/48x48/apps/dedup.png"
             install -Dm644 "${SRCDIR}/app/src-tauri/icons/32x32.png" "\$pkgdir/usr/share/icons/hicolor/32x32/apps/dedup.png"
+            install -Dm644 "${SRCDIR}/app/src-tauri/icons/24x24.png" "\$pkgdir/usr/share/icons/hicolor/24x24/apps/dedup.png"
+            install -Dm644 "${SRCDIR}/app/src-tauri/icons/16x16.png" "\$pkgdir/usr/share/icons/hicolor/16x16/apps/dedup.png"
+            install -Dm644 "${SRCDIR}/app/src-tauri/icons/icon.svg" "\$pkgdir/usr/share/icons/hicolor/scalable/apps/dedup.svg"
             install -Dm644 "${SRCDIR}/LICENSE" "\$pkgdir/usr/share/licenses/\$pkgname/LICENSE"
           }
           PEOF
