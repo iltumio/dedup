@@ -168,15 +168,6 @@ h2[tabindex="-1"]:focus {
   color: var(--color-primary);
   margin-left: -9px;
 }
-.brand-mark {
-  display: grid;
-  place-items: center;
-  background: var(--color-primary);
-  color: var(--color-primary-content);
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-}
 .sidebar-label {
   font-size: 10px;
   color: var(--muted);

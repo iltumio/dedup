@@ -2,6 +2,7 @@
   import UiSelect from "./ui/UiSelect.svelte";
   import type { Snippet } from "svelte";
   import Icon from "./ui/Icon.svelte";
+  import BrandMark from "./ui/BrandMark.svelte";
   import { app } from "$lib/state/app.svelte";
   export type View = "files" | "duplicates" | "activity" | "stats";
   let {
@@ -32,7 +33,7 @@
 <div class="app-shell">
   <aside class="app-sidebar">
     <a class="brand" href="/" aria-label="dedup home"
-      ><span class="brand-mark"><Icon name="copies" /></span>dedup<span
+      ><BrandMark />dedup<span
         class="brand-dot">.</span
       ></a
     >

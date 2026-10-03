@@ -1,7 +1,10 @@
 [Desktop Entry]
 Name=dedup
-Comment=Content-Addressed File Browser
+GenericName=File Archive
+Comment=Archive folders and store identical files only once
 Exec=dedup-app
 Icon=dedup
 Type=Application
 Categories=Utility;FileTools;
+Keywords=duplicates;deduplicate;archive;backup;files;
+StartupWMClass=dedup-app
