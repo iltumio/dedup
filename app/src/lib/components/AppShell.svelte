@@ -11,6 +11,9 @@
     scanning,
     onViewChange,
     onScan,
+    scanLabel = "Add folder",
+    scanTitle,
+    scanPrimary = true,
     workspaceControl,
     children,
   }: {
@@ -19,6 +22,9 @@
     scanning: boolean;
     onViewChange: (view: View) => void;
     onScan: () => void;
+    scanLabel?: string;
+    scanTitle?: string;
+    scanPrimary?: boolean;
     workspaceControl?: Snippet;
     children?: Snippet;
   } = $props();
@@ -80,12 +86,14 @@
         >
         <h1>{views.find((v) => v.id === currentView)?.label ?? "Files"}</h1>
       </div>
-      <button
+      {#if hasWorkspace}<button
         type="button"
-        class="btn btn-primary"
-        disabled={!hasWorkspace || scanning}
-        onclick={onScan}><Icon name="plus" size={18} />Add folder</button
-      >
+        class="btn add-folder"
+        class:btn-primary={scanPrimary}
+        title={scanTitle}
+        disabled={scanning}
+        onclick={onScan}><Icon name="plus" size={18} />{scanLabel}</button
+        >{/if}
     </header>
     <main class="app-main">{@render children?.()}</main>
   </div>

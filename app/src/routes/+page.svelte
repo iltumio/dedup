@@ -44,6 +44,8 @@
       app.activeWorkspace?.stats.scans_count
     ),
   );
+  // The header CTA adds into the folder open in Files, or the archive root.
+  const scanTarget = $derived(currentView === "files" ? browserPath : "/");
   const contentKey = $derived(
     `${app.workspacesConfig.active_workspace_id}:${app.treeRefreshKey}`,
   );
@@ -261,7 +263,12 @@
   hasWorkspace={app.hasWorkspace}
   scanning={app.scanning}
   onViewChange={(view) => (currentView = view)}
-  onScan={() => goToScan()}
+  onScan={() => goToScan(scanTarget)}
+  scanLabel={scanTarget === "/"
+    ? "Add folder"
+    : `Add to ${scanTarget.split("/").pop()}`}
+  scanTitle={scanTarget === "/" ? undefined : `Add a folder to ${scanTarget}`}
+  scanPrimary={!(currentView === "files" && emptyArchive)}
 >
   {#snippet workspaceControl()}
     <div class="flex items-center gap-1">
@@ -380,7 +387,6 @@
   {:else if app.scanning || currentView === "activity"}<ScanActivity
       onFiles={() => (currentView = "files")}
       onDuplicates={() => (currentView = "duplicates")}
-      onNew={() => goToScan()}
     />
   {:else}
     {#key contentKey}

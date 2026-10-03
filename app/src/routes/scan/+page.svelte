@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { goto } from "$app/navigation";
   import { UiButton, UiEmptyState, UiField } from "$lib/components/ui";
   import CustomScanRuleEditor from "$lib/components/scan/CustomScanRuleEditor.svelte";
@@ -7,6 +8,8 @@
   import ScanActivity from "$lib/components/scan/ScanActivity.svelte";
   import Icon from "$lib/components/ui/Icon.svelte";
   let showActivity = $state(app.scanning);
+  let advanced = $state<HTMLDetailsElement>();
+  let locationInput = $state<HTMLInputElement>();
   import { pickDirectory } from "$lib/api/tauri";
   import { app } from "$lib/state/app.svelte";
 
@@ -64,6 +67,14 @@
     goto("/");
   }
 
+  async function changeLocation() {
+    if (!advanced) return;
+    advanced.open = true;
+    await tick();
+    locationInput?.focus();
+    locationInput?.select();
+  }
+
   async function startScan() {
     if (startDisabled) return;
     showActivity = true;
@@ -79,8 +90,6 @@
       disabled={app.scanning}
       onclick={() => goto("/")}
       ><Icon name="back" size={18} />Back to archive</button
-    ><span class="muted"
-      >{app.activeWorkspace?.label ?? "No archive selected"}</span
     >
   </header>
   {#if showActivity}
@@ -133,7 +142,7 @@
             </p>
           </div>
         </div>
-        <details class="disclosure">
+        <details class="disclosure" bind:this={advanced}>
           <summary
             ><span class="flex items-center gap-2"
               ><Icon name="settings" size={18} />Advanced options</span
@@ -144,6 +153,7 @@
               label="Folder inside the archive"
               hint="Use / for the archive root, or a path such as /photos."
               ><input
+                bind:this={locationInput}
                 class="input w-full font-path"
                 value={app.targetPath}
                 oninput={(event) => (app.targetPath = inputValue(event))}
@@ -196,8 +206,13 @@
       </div>
     </main>
     <footer class="scan-form-actions">
-      <span class="muted text-sm"
-        >Destination: {app.activeWorkspace?.label}</span
+      <span class="destination muted text-sm"
+        >Destination: <strong>{app.activeWorkspace?.label}</strong
+        >{#if app.targetPath.trim() && app.targetPath.trim() !== "/"}<span
+            class="font-path">{" › "}{app.targetPath.trim()}</span
+          >{/if}<button class="link-button" type="button" onclick={changeLocation}
+          >Change</button
+        ></span
       ><UiButton variant="primary" disabled={startDisabled} onclick={startScan}
         >Start scan<Icon name="chevron" size={16} /></UiButton
       >
