@@ -380,3 +380,23 @@ test("a late association check cannot hide Open for the next file", async ({
   await page.waitForTimeout(450);
   await expect(open).toBeEnabled();
 });
+
+test("the header CTA adds into the open folder and the form shows that destination", async ({
+  page,
+}) => {
+  await fixture(page);
+  await expect(page.getByRole("button", { name: "Add here" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Vacations", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Add to Vacations", exact: true })
+    .click();
+  await expect(page.getByText("› /Vacations")).toBeVisible();
+  await page.getByRole("button", { name: "Change", exact: true }).click();
+  await expect(
+    page.getByRole("textbox", { name: "Folder inside the archive" }),
+  ).toBeFocused();
+  await page.getByRole("button", { name: "Back to archive" }).click();
+  await page.getByRole("button", { name: "Duplicates", exact: true }).click();
+  await page.getByRole("button", { name: "Add folder", exact: true }).click();
+  await expect(page.getByText("› /Vacations")).toHaveCount(0);
+});

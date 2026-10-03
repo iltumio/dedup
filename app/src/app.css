@@ -440,6 +440,22 @@ h2[tabindex="-1"]:focus {
   background: var(--color-base-100);
   gap: 16px;
 }
+.destination {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.destination strong {
+  color: var(--color-base-content);
+}
+.link-button {
+  margin-left: 10px;
+  color: var(--color-primary);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .activity-view {
   display: flex;
   flex-direction: column;

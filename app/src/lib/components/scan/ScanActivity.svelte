@@ -6,7 +6,7 @@
     onFiles,
     onDuplicates,
     onNew,
-  }: { onFiles: () => void; onDuplicates: () => void; onNew: () => void } =
+  }: { onFiles: () => void; onDuplicates: () => void; onNew?: () => void } =
     $props();
   let now = $state(Date.now());
   let title: HTMLHeadingElement;
@@ -204,9 +204,9 @@
         onclick={app.requestCancel}
         >{app.cancelling ? "Stopping…" : "Stop scan"}</button
       >
-    {:else}<button class="btn btn-ghost" type="button" onclick={onNew}
-        >Add another folder</button
-      >
+    {:else}{#if onNew}<button class="btn btn-ghost" type="button" onclick={onNew}
+          >Add another folder</button
+        >{:else}<span></span>{/if}
       <div class="flex gap-2">
         {#if activity?.workspaceId === app.activeWorkspace?.id}<button
             class="btn"

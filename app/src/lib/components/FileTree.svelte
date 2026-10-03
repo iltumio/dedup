@@ -175,7 +175,10 @@
           >{:else}<button
             class="btn btn-primary"
             type="button"
-            onclick={() => onScanInto(currentPath)}>Add a folder here</button
+            onclick={() => onScanInto(currentPath)}
+            >{currentPath === "/"
+              ? "Add your first folder"
+              : "Add a folder here"}</button
           >{/if}
       </div>
     {:else}<table class="file-table">
@@ -230,10 +233,6 @@
           disabled={page >= pages}
           onclick={() => page++}>Next</button
         >
-      </div>{:else}<button
-        class="btn btn-ghost btn-sm"
-        type="button"
-        onclick={() => onScanInto(currentPath)}>Add here</button
-      >{/if}
+      </div>{/if}
   </footer>
 </div>
