@@ -7,6 +7,23 @@ adheres to [Semantic Versioning](https://semver.org), and the changelog is maint
 automatically by [Knope](https://knope.tech) from
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## 0.2.0 (2026-10-03)
+
+### Features
+
+- new vector app icon aligned with in-app brand
+- consolidate add-folder calls to action
+
+#### New app icon
+
+Replaced the app icon with a vector "many copies → one file" mark that stays legible at small sizes and matches the logo in the sidebar. Linux packages now install every hicolor size plus a scalable SVG, and the desktop entry sets `StartupWMClass` so the window is matched to its launcher icon.
+
+### Fixes
+
+#### One clear way to add a folder
+
+The header button now adds into the folder you are viewing ("Add to Vacations") and replaces the separate "Add here" link. The scan form shows the full destination with a Change link, the header button steps back when an empty folder offers its own call to action, and duplicate "Add folder" buttons were removed from the Activity view and the no-archive screen.
+
 ## 0.1.7 (2026-09-13)
 
 ### Features
