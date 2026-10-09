@@ -2,7 +2,7 @@
 
 Content-addressed file deduplication tool with a desktop visualizer.
 
-`dedup` scans directories, hashes every file with BLAKE3, compresses unique content with LZ4, and stores it in a content-addressed blob store. Duplicate files are detected automatically and stored only once. A Tauri + Svelte 5 desktop app lets you browse the virtual filesystem and inspect duplicates.
+`dedup` scans directories, identifies files with BLAKE3, splits their content with FastCDC, and compresses shared chunks with LZ4. Exact copies and unchanged parts of similar files are stored only once. Existing whole-file archives remain readable and writable until explicitly migrated. A Tauri + Svelte 5 desktop app lets you browse the virtual filesystem and inspect duplicates.
 
 ## Install
 
@@ -31,18 +31,81 @@ just build-app   # Desktop app (also needs Node.js 22+)
 dedup scan --source ~/photos
 ```
 
-This creates a `.store/` directory containing compressed blobs and a metadata database. Files with identical content are stored once.
+This creates a `.store/` directory containing compressed chunks, a manifest database, and filesystem metadata. New stores use format v2 with FastCDC; opening an existing legacy store preserves its whole-file format.
+
+In the desktop app, **Create an archive** includes an **Archive format** choice:
+**FastCDC** (default) shares identical files and chunks of similar files;
+**Original (whole files)** shares identical whole files. Choose a new or empty
+folder. The selected format is initialized immediately and preserved when the
+archive is reopened. Existing archives opened through **Open existing** keep
+their format; original archives can later be migrated to FastCDC.
 
 ```
 Scan complete!
   Files:           1,204
   Directories:     47
-  Unique blobs:    983
+  Unique files:    983
   Duplicate files: 221
   Original size:   4.2 GB
   Stored size:     2.1 GB
   Space saved:     2.1 GB (50.0%)
 ```
+
+### Migrate an existing archive to FastCDC
+
+In the desktop app, open **Manage archives**, expand **Archive options** on the
+source archive, and choose **Migrate to FastCDC**. Choose a name and a separate
+destination folder and the number of **Parallel files** (default 4), then start
+migration. The dialog shows elapsed time, processed bytes, read and verification
+rate, and each active file's conversion or verification progress. Updates arrive
+every half second, including while preparing the index and calculating final
+totals. A separate message reports when data has stopped advancing, even if the
+app still responds. The dialog offers **Stop migration**. Interrupted jobs retain their destination in the
+archive list: choose **Resume migration**, even after restarting the app.
+On completion the new archive is added automatically; choose **Open migrated
+archive** to switch to it, or keep the original open. Scans and archive switching
+are blocked while conversion runs.
+
+The same conversion is also available from the CLI:
+
+```sh
+dedup migrate --source .store --destination .store-v2 --workers 4
+```
+
+Migration reconstructs content directly from the archived LZ4 blobs; the original
+source files are not needed. It converts each distinct file CID once, verifies the
+reconstructed destination with BLAKE3, and preserves paths, exact-file CIDs,
+directory metadata, dates, permissions, and duplicate groups. The original archive
+is opened without committing any writes and remains available for rollback.
+
+The destination must be empty or belong to the same migration. A dedicated
+subdirectory is supported when the source archive occupies a disk root, e.g.
+`/run/media/user/T7/fastcdc`. The original archive's `blobs` directory and internal
+database/checkpoint paths are protected; the destination cannot be the source
+itself or one of its ancestors. Symlink aliases are checked as well. If interrupted,
+run the same command again: verified chunks and manifests are reused, damaged
+checkpoints are repaired from the source, and metadata commits are resumed.
+A changed source archive or chunking profile is rejected. Incomplete destinations
+cannot be opened as normal stores. Keep the source unchanged until completion.
+Both archives coexist, so allow space for the new archive during conversion.
+Checkpoint and chunk publication use durable temporary files, file locks and
+atomic renames; hard links are not required, including on exFAT volumes.
+
+Parallelism is across distinct files; a single remaining file uses one worker.
+`--workers` accepts 1–32 and can change when resuming an existing checkpoint,
+including checkpoints created by the serial migrator. Concurrent disk reads and
+writes may limit the benefit on slower drives. The displayed processing rate
+counts uncompressed reads and verification, rather than physical disk writes.
+
+After completion, use `--store .store-v2` or import that directory into the desktop
+app. Older releases cannot read the v2 manifest format; use the original store if
+you need to return to an older release. No automatic deletion or in-place upgrade
+is performed.
+
+The default persisted profile is FastCDC v2020, normalization level 1, seed 0,
+with minimum/target/maximum sizes of 16/64/256 KiB. Migration also accepts
+`--min-chunk-size`, `--avg-chunk-size`, and `--max-chunk-size` in bytes. Target sizes
+must be powers of two; reruns must use the original migration profile.
 
 ### Browse the virtual filesystem
 
@@ -76,17 +139,42 @@ dedup cat /photos/vacation/img1.jpg -o restored.jpg
 ```
 Source directory
   │
-  │  walkdir + BLAKE3 hashing
+  │  walkdir + BLAKE3 hashing + FastCDC
   ▼
 Content Store (.store/)
-  ├── blobs/          LZ4-compressed, named by CIDv1
-  └── metadata.redb   Virtual path → CID mapping
+  ├── blobs/          LZ4-compressed chunks, named by CIDv1
+  ├── content.redb    Format/profile + file CID → ordered chunk manifest
+  └── metadata.redb   Virtual paths, dates, permissions, duplicate index
 ```
 
-- **Hashing**: BLAKE3 wrapped in CIDv1 (IPFS-compatible identifiers)
+- **Hashing**: whole-file and chunk BLAKE3 wrapped in CIDv1; file identity is independent of chunk boundaries
+- **Chunking**: FastCDC v2020 with a versioned, persisted profile; chunk boundaries are computed before compression
 - **Compression**: LZ4 frame format (~3 GB/s decompression)
 - **Metadata**: redb (pure-Rust, ACID, supports prefix range scans)
-- **Dedup index**: CID → \[paths\] multimap for instant duplicate lookup
+- **Dedup index**: file CID → \[paths\] multimap for exact-file duplicate lookup; chunk sharing is tracked separately
+
+Storage totals count each referenced compressed chunk and each serialized manifest
+once, excluding database page allocation, temporary files, and unreferenced
+historical content. Per-extension totals split shared payloads equally between the
+extensions referencing them, with deterministic rounding. `unique_blobs` in the
+library response continues to mean unique whole-file CIDs, not chunk count.
+Scan stored-byte totals describe newly published payloads during that scan.
+
+### Compare chunking profiles
+
+```sh
+cargo run -p dedup-core --release --example fastcdc_benchmark
+cargo run -p dedup-core --release --example fastcdc_benchmark -- /path/to/data
+```
+
+The first command uses deterministic synthetic file versions; the second reads the
+specified directory into memory. Both compare whole-file storage with FastCDC
+64 KiB and 256 KiB profiles, measuring write/verified-read throughput, compressed
+blob bytes, actual manifest database size, and blob count. Temporary benchmark
+stores are removed automatically. Measure representative data before choosing a
+custom profile; smaller chunks can improve sharing while increasing I/O and
+metadata costs. Normal scanning currently reads each file into memory; migration
+and `ContentStore::copy_to` stream content with bounded chunk buffers.
 
 ## Project structure
 

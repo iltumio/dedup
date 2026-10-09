@@ -225,6 +225,7 @@ test("first run creates and activates an archive, then offers a simple scan form
   await expect(
     page.getByRole("textbox", { name: "Folder inside the archive" }),
   ).toBeHidden();
+  expect(await page.evaluate(() => (window as any).__dedupTest.createCalls[0].format)).toBe("fastcdc");
 });
 
 test("primary screens meet automated accessibility checks in both themes", async ({
@@ -399,4 +400,167 @@ test("the header CTA adds into the open folder and the form shows that destinati
   await page.getByRole("button", { name: "Duplicates", exact: true }).click();
   await page.getByRole("button", { name: "Add folder", exact: true }).click();
   await expect(page.getByText("› /Vacations")).toHaveCount(0);
+});
+
+async function openMigration(page: Page) {
+  await page.getByRole("button", { name: "Manage archives", exact: true }).click();
+  const archive = page.locator("li").filter({ has: page.getByText("Photo archive", { exact: true }) });
+  await archive.getByText("Archive options", { exact: true }).click();
+  await archive.getByRole("button", { name: /^(Migrate to FastCDC|Resume migration)$/ }).click();
+  await expect(page.getByRole("dialog", { name: /Migrate to FastCDC|Migration stopped/ })).toBeVisible();
+}
+
+async function startMigration(page: Page) {
+  await openMigration(page);
+  await page.getByRole("textbox", { name: "Destination folder", exact: true }).fill("/backups/photos-fastcdc");
+  await page.getByRole("button", { name: "Start migration", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__dedupTest.migrationCalls.length)).toBe(1);
+}
+
+test("migration shows progress, ignores stale events, imports the new archive and keeps the original", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 500 });
+  await fixture(page);
+  await startMigration(page);
+  const dialog = page.getByRole("dialog", { name: "Migration in progress", exact: true });
+  await expect(dialog.getByRole("button", { name: "Stop migration", exact: true })).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "Close dialog" })).toBeDisabled();
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration({ unique_files: 9 }, "previous-job"));
+  await expect(dialog.getByText("9 of 10 unique files verified")).toHaveCount(0);
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration());
+  await expect(dialog.getByText("3 of 10 unique files verified", { exact: true })).toBeVisible();
+  const accessibility = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
+  expect(accessibility.violations).toEqual([]);
+  await page.evaluate(() => (window as any).__dedupTest.finishMigration());
+  await expect(page.getByRole("heading", { name: "Migration complete", exact: true })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Current archive" })).toHaveText("Photo archive");
+  await page.evaluate(() => { (window as any).__dedupTest.failRefresh = true; });
+  await page.getByRole("button", { name: "Open migrated archive", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Migration complete", exact: true }).getByRole("alert")).toContainText("Refresh unavailable");
+  await page.getByRole("button", { name: "Open migrated archive", exact: true }).click();
+  await expect(page.getByRole("combobox", { name: "Current archive" })).toHaveText("Photo archive (FastCDC)");
+  const workspaces = await page.evaluate(() => (window as any).__dedupTest.migrationCalls[0]);
+  expect(workspaces.workspaceId).toBe("one");
+  expect(workspaces.destination).toBe("/backups/photos-fastcdc");
+});
+
+test("migration cancellation can be resumed after reopening the app", async ({ page }) => {
+  await fixture(page);
+  await startMigration(page);
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration());
+  await page.getByRole("button", { name: "Stop migration", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Migration stopped", exact: true })).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", { name: "photo-001.jpg", exact: true }).waitFor();
+  await openMigration(page);
+  await expect(page.getByRole("textbox", { name: "Destination folder", exact: true })).toHaveValue("/backups/photos-fastcdc");
+  await page.getByRole("button", { name: "Resume migration", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__dedupTest.migrationCalls.length)).toBe(1);
+  await page.evaluate(() => (window as any).__dedupTest.finishMigration());
+  await expect(page.getByRole("heading", { name: "Migration complete", exact: true })).toBeVisible();
+});
+
+test("migration errors are retryable and refresh failure preserves successful completion", async ({ page }) => {
+  await fixture(page);
+  await startMigration(page);
+  await page.evaluate(() => (window as any).__dedupTest.failMigration());
+  await expect(page.getByRole("heading", { name: "Migration could not finish", exact: true })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: "Disk is full" })).toBeVisible();
+  await page.getByRole("button", { name: "Retry migration", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__dedupTest.migrationCalls.length)).toBe(2);
+  await page.evaluate(() => { (window as any).__dedupTest.failRefresh = true; (window as any).__dedupTest.finishMigration(); });
+  await expect(page.getByRole("heading", { name: "Migration complete", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open migrated archive", exact: true })).toBeEnabled();
+});
+
+test("already-FastCDC archives cannot be migrated again, and destination picker works", async ({ page }) => {
+  await fixture(page);
+  await page.evaluate(() => { (window as any).__dedupTest.storageFormat = 2; });
+  await openMigration(page);
+  await expect(page.getByText("This archive already uses FastCDC.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start migration", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Browse", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Destination folder", exact: true })).toHaveValue("/chosen/fastcdc-archive");
+});
+
+test("migration exposes byte progress before a file finishes and validates parallelism", async ({ page }) => {
+  await fixture(page);
+  await openMigration(page);
+  await page.getByRole("textbox", { name: "Destination folder", exact: true }).fill("/backups/photos-fastcdc");
+  const workers = page.getByRole("spinbutton", { name: "Parallel files", exact: true });
+  const start = page.getByRole("button", { name: "Start migration", exact: true });
+  await workers.fill("0");
+  await expect(start).toBeDisabled();
+  await workers.fill("2");
+  await start.click();
+  await expect.poll(() => page.evaluate(() => (window as any).__dedupTest.migrationCalls.length)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__dedupTest.migrationCalls[0].workers)).toBe(2);
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration({ unique_files: 0, resumed_files: 0 }));
+  const dialog = page.getByRole("dialog", { name: "Migration in progress", exact: true });
+  const file = dialog.getByRole("progressbar", { name: "Converting /backup/large.mov", exact: true });
+  await expect(dialog.getByText("0 of 10 unique files verified", { exact: true })).toBeVisible();
+  await expect(file).toHaveAttribute("value", "1048576");
+  await expect(dialog.getByText("1 of 2 parallel files active", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Read & verification rate", { exact: true })).toBeVisible();
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration({
+    unique_files: 0, resumed_files: 0, work_bytes: 4194304,
+    active_files: [{ path: "/backup/large.mov", stage: "converting", bytes_processed: 2097152, total_bytes: 8388608 }],
+  }));
+  await expect(file).toHaveAttribute("value", "2097152");
+  await expect(dialog.getByText("0 of 10 unique files verified", { exact: true })).toBeVisible();
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration({ phase: "finalizing", active_files: [] }));
+  await expect(dialog.getByText("Calculating totals and adding the archive…", { exact: true })).toBeVisible();
+  await page.evaluate(() => (window as any).__dedupTest.finishMigration());
+  const completed = page.getByRole("dialog", { name: "Migration complete", exact: true });
+  await expect(completed).toBeVisible();
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration({ unique_files: 0 }));
+  await expect(completed.getByText("0 of 10 unique files verified", { exact: true })).toHaveCount(0);
+});
+
+test("migration distinguishes responding updates from stalled data and missing updates", async ({ page }) => {
+  await fixture(page);
+  await startMigration(page);
+  await page.clock.install();
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration({ idle_seconds: 40, rate_bytes_per_second: 0 }));
+  const dialog = page.getByRole("dialog", { name: "Migration in progress", exact: true });
+  await expect(dialog.getByText("Updates arriving · last update just now", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/No data progress for 40s/)).toBeVisible();
+  await page.clock.runFor(6000);
+  await expect(dialog.getByText(/Waiting for an update · last update 6s ago/)).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Stop migration", exact: true })).toBeInViewport();
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration({ idle_seconds: 0, rate_bytes_per_second: 2097152 }));
+  await expect(dialog.getByText("Updates arriving · last update just now", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/No data progress/)).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Stop migration", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Migration stopped", exact: true })).toBeVisible();
+});
+
+test("archive creation offers the original format and resets the choice for the next archive", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 500 });
+  await fixture(page, true);
+  await page.getByRole("button", { name: "Create an archive", exact: true }).click();
+  const format = page.getByRole("combobox", { name: "Archive format", exact: true });
+  await expect(format).toHaveText("FastCDC");
+  await expect(page.getByText("Shares identical files and unchanged parts of similar files.", { exact: true })).toBeVisible();
+  await page.getByText("Archive format", { exact: true }).click();
+  await expect(format).toBeFocused();
+  await format.click();
+  await page.getByRole("option", { name: "Original (whole files)", exact: true }).click();
+  await expect(format).toHaveText("Original (whole files)");
+  await expect(page.getByText("Shares identical whole files. You can migrate to FastCDC later.", { exact: true })).toBeVisible();
+  await page.getByRole("textbox", { name: "Archive name", exact: true }).fill("Original photos");
+  await page.getByRole("textbox", { name: "Archive location", exact: true }).fill("/example/original.store");
+  const accessibility = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
+  expect(accessibility.violations).toEqual([]);
+  await page.getByRole("button", { name: "Create archive", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "A folder. One safe copy." })).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__dedupTest.createCalls[0])).toMatchObject({
+    label: "Original photos", storePath: "/example/original.store", format: "legacy",
+  });
+  await page.getByRole("button", { name: "Back to archive", exact: true }).click();
+  await page.getByRole("button", { name: "Manage archives", exact: true }).click();
+  await page.getByRole("button", { name: "Create archive", exact: true }).click();
+  await expect(format).toHaveText("FastCDC");
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await page.getByRole("button", { name: "Open existing", exact: true }).click();
+  await expect(format).toHaveCount(0);
 });

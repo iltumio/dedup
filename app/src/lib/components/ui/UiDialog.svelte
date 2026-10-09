@@ -65,6 +65,8 @@
   bind:this={dialog}
   class="modal bg-transparent p-0 text-base-content"
   aria-modal="true"
+  aria-hidden={!open}
+  inert={!open}
   aria-labelledby={titleId}
   aria-describedby={description ? descriptionId : undefined}
   oncancel={handleCancel}
@@ -95,7 +97,8 @@
       </button>
     </header>
 
-    <div class="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard focus enables scrolling when the form controls are disabled.) -->
+    <div class="min-h-0 flex-1 overflow-y-auto px-4 py-4" role="region" aria-labelledby={titleId} tabindex="0">
       {@render children?.()}
     </div>
 

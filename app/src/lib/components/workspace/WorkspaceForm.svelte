@@ -1,5 +1,7 @@
 <script lang="ts">
   import { UiButton, UiField } from "$lib/components/ui";
+  import UiSelect from "$lib/components/ui/UiSelect.svelte";
+  import type { StorageFormat } from "$lib/api/tauri";
 
   type Mode = "create" | "import";
 
@@ -8,11 +10,13 @@
     label: string;
     tags?: string;
     storePath: string;
+    format?: StorageFormat;
     loading?: boolean;
     error?: string | null;
     onLabelChange: (value: string) => void;
     onTagsChange?: (value: string) => void;
     onStorePathChange: (value: string) => void;
+    onFormatChange?: (value: StorageFormat) => void;
     onBrowseFolder?: () => void;
     onBrowseFile?: () => void;
     onSubmit: () => void;
@@ -24,11 +28,13 @@
     label,
     tags = "",
     storePath,
+    format = "fastcdc",
     loading = false,
     error = null,
     onLabelChange,
     onTagsChange,
     onStorePathChange,
+    onFormatChange,
     onBrowseFolder,
     onBrowseFile,
     onSubmit,
@@ -55,7 +61,7 @@
   );
   let storeHint = $derived(
     mode === "create"
-      ? "A separate destination for archived content. Your source files stay in place."
+      ? "Choose a new or empty folder for archived content. Your source files stay in place."
       : "Choose the archive folder or its metadata.redb file.",
   );
 
@@ -85,6 +91,14 @@
     </UiField>
 
     {#if mode === "create"}
+      <UiField label="Archive format" hint={format === "fastcdc"
+        ? "Shares identical files and unchanged parts of similar files."
+        : "Shares identical whole files. You can migrate to FastCDC later."}>
+        <UiSelect label="Archive format" value={format}
+          options={[{ value: "fastcdc", label: "FastCDC" }, { value: "legacy", label: "Original (whole files)" }]}
+          disabled={loading}
+          onValueChange={(value) => onFormatChange?.(value as StorageFormat)} />
+      </UiField>
       <details class="disclosure">
         <summary>Optional tags</summary>
         <div class="detail-content">

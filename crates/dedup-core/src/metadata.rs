@@ -18,6 +18,12 @@ const CID_PATHS_TABLE: MultimapTableDefinition<&str, &str> =
 /// Directory path → bincode-serialized DirMetadata
 const DIRS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("dirs");
 
+#[derive(serde::Serialize)]
+pub(crate) struct MetadataSnapshot {
+    pub files: Vec<(String, FileMetadata)>,
+    pub dirs: Vec<(String, DirMetadata)>,
+}
+
 /// Wrapper around a redb database for filesystem metadata.
 pub struct MetadataDb {
     db: Database,
@@ -39,6 +45,44 @@ impl MetadataDb {
         write_txn.commit()?;
 
         Ok(Self { db })
+    }
+
+    /// Open an existing archive without creating tables or committing writes.
+    pub(crate) fn open_existing(path: &Path) -> Result<Self> {
+        let db = Database::open(path)?;
+        {
+            let txn = db.begin_read()?;
+            txn.open_table(PATHS_TABLE)?;
+            txn.open_table(DIRS_TABLE)?;
+            txn.open_multimap_table(CID_PATHS_TABLE)?;
+        }
+        Ok(Self { db })
+    }
+
+    /// Take a consistent, deterministic snapshot for migration and accounting.
+    pub(crate) fn snapshot(&self) -> Result<MetadataSnapshot> {
+        let txn = self.db.begin_read()?;
+        let paths = txn.open_table(PATHS_TABLE)?;
+        let dirs = txn.open_table(DIRS_TABLE)?;
+        let mut snapshot = MetadataSnapshot {
+            files: Vec::new(),
+            dirs: Vec::new(),
+        };
+        for row in paths.iter()? {
+            let (path, bytes) = row?;
+            snapshot.files.push((
+                path.value().to_owned(),
+                bincode::deserialize(bytes.value())?,
+            ));
+        }
+        for row in dirs.iter()? {
+            let (path, bytes) = row?;
+            snapshot.dirs.push((
+                path.value().to_owned(),
+                bincode::deserialize(bytes.value())?,
+            ));
+        }
+        Ok(snapshot)
     }
 
     /// Insert or update file metadata for a virtual path.

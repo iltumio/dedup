@@ -26,9 +26,14 @@ export async function fixture(page: Page, empty = false) {
         workspaces: empty ? [] : [workspace("one"), workspace("two")],
         active_workspace_id: empty ? null : "one",
         custom_scan_rules: [],
+        pending_migrations: JSON.parse(sessionStorage.getItem("dedup-test-pending-migrations") ?? "[]"),
       };
       let scanResolve: (value: unknown) => void;
       let scanReject: (value: unknown) => void;
+      let migrationResolve: (value: unknown) => void;
+      let migrationReject: (value: unknown) => void;
+      let migrationArgs: any;
+      let migrationListener = 0;
       const callbacks = new Map();
       let nextId = 1;
       let listener = 0;
@@ -40,6 +45,25 @@ export async function fixture(page: Page, empty = false) {
         failOpen: false,
         unsupportedOpen: false,
         failOpenCheck: false,
+        storageFormat: 1,
+        migrationCalls: [] as any[],
+        createCalls: [] as any[],
+        emitMigration: (overrides = {}, jobId?: string) => callbacks.get(migrationListener)?.({
+          event: "migration-progress", id: 2,
+          payload: { job_id: jobId ?? migrationArgs?.jobId,
+            progress: { unique_files: 3, resumed_files: 1, total_unique_files: 10, bytes_processed: 1048576,
+              total_bytes: 10485760, work_bytes: 2097152, elapsed_seconds: 4, rate_bytes_per_second: 1048576,
+              idle_seconds: 0, workers: migrationArgs?.workers ?? 4, phase: "migrating",
+              active_files: [{ path: "/backup/large.mov", stage: "converting", bytes_processed: 1048576, total_bytes: 8388608 }], ...overrides } },
+        }),
+        finishMigration: () => {
+          const migrated = { ...workspace("migrated"), label: migrationArgs.label, store_path: migrationArgs.destination };
+          config.workspaces.push(migrated);
+          config.pending_migrations = [];
+          sessionStorage.removeItem("dedup-test-pending-migrations");
+          migrationResolve(migrated);
+        },
+        failMigration: (message = "Disk is full") => migrationReject(message),
         emit: (overrides = {}) =>
           callbacks.get(listener)?.({
             event: "scan-progress",
@@ -77,9 +101,23 @@ export async function fixture(page: Page, empty = false) {
           if (cmd === "list_custom_scan_rules") return [];
           if (cmd === "save_custom_scan_rules") return args.rules;
           if (cmd === "plugin:event|listen") {
+            if (args.event === "migration-progress") { migrationListener = args.handler; return 2; }
             listener = args.handler;
             return 1;
           }
+          if (cmd === "workspace_storage_format") return api.storageFormat;
+          if (cmd === "migrate_workspace") {
+            migrationArgs = args;
+            api.migrationCalls.push(structuredClone(args));
+            config.pending_migrations = [{ workspace_id: args.workspaceId, destination: args.destination, label: args.label }];
+            sessionStorage.setItem("dedup-test-pending-migrations", JSON.stringify(config.pending_migrations));
+            return new Promise((resolve, reject) => { migrationResolve = resolve; migrationReject = reject; });
+          }
+          if (cmd === "cancel_migration") {
+            if (args.jobId === migrationArgs?.jobId) migrationReject("migration cancelled; run the same command to resume");
+            return;
+          }
+          if (cmd === "plugin:dialog|open") return "/chosen/fastcdc-archive";
           if (cmd === "plugin:event|unlisten") return;
           if (cmd === "scan_directory")
             return new Promise((resolve, reject) => {
@@ -95,6 +133,7 @@ export async function fixture(page: Page, empty = false) {
             return workspace(args.workspaceId);
           }
           if (cmd === "create_workspace") {
+            api.createCalls.push(structuredClone(args));
             const ws = {
               ...workspace(`created-${config.workspaces.length}`),
               label: args.label,

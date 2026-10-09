@@ -9,9 +9,11 @@
 pub mod cid;
 pub mod content_store;
 pub mod metadata;
+pub mod migration;
 pub mod scanner;
 pub mod types;
 
+pub use content_store::ChunkingProfile;
 pub use content_store::ContentStore;
 pub use metadata::MetadataDb;
 pub use types::{
@@ -23,6 +25,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+/// Storage layout chosen at creation and detected automatically on reopening.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageFormat {
+    Legacy,
+    #[default]
+    Fastcdc,
+}
+
 /// A complete dedup store combining content storage and metadata.
 pub struct Store {
     pub content: ContentStore,
@@ -31,21 +42,75 @@ pub struct Store {
 }
 
 impl Store {
+    /// Create an archive in a new or empty directory with an explicit format.
+    /// Existing archives must be opened, or migrated to another directory.
+    pub fn create(root: &Path, format: StorageFormat) -> Result<Self> {
+        if root.try_exists()? {
+            anyhow::ensure!(root.is_dir(), "archive location must be a directory");
+            anyhow::ensure!(
+                std::fs::read_dir(root)?.next().is_none(),
+                "archive location must be empty; open an existing archive instead"
+            );
+        }
+        std::fs::create_dir_all(root)?;
+        let content = match format {
+            StorageFormat::Fastcdc => {
+                ContentStore::open_with_profile(root, ChunkingProfile::default())?
+            }
+            StorageFormat::Legacy => {
+                // The v1 layout has no content.redb. Its blobs directory makes
+                // the format recognizable before any file has been archived.
+                std::fs::create_dir(root.join("blobs"))?;
+                ContentStore::open(root)?
+            }
+        };
+        let metadata = MetadataDb::open(&root.join("metadata.redb"))?;
+        Ok(Self {
+            content,
+            metadata,
+            root: root.to_path_buf(),
+        })
+    }
+
     /// Open or create a dedup store at the given root directory.
     ///
     /// Creates the following structure:
     /// ```text
     /// <root>/
-    ///   blobs/        — LZ4-compressed content blobs
+    ///   blobs/        — LZ4-compressed content chunks (whole files in v1)
+    ///   content.redb  — v2 format/profile and ordered file manifests
     ///   metadata.redb — virtual filesystem metadata
     /// ```
     pub fn open(root: &Path) -> Result<Self> {
+        migration::ensure_complete(root)?;
+        Self::open_impl(root, false)
+    }
+
+    /// Open a pre-existing archive, without creating a store on a typo.
+    pub fn open_existing(root: &Path) -> Result<Self> {
+        migration::ensure_complete(root)?;
+        anyhow::ensure!(
+            root.join("metadata.redb").is_file(),
+            "source store does not exist"
+        );
+        anyhow::ensure!(
+            root.join("blobs").is_dir(),
+            "source store has no blobs directory"
+        );
+        Self::open_impl(root, true)
+    }
+
+    pub(crate) fn open_impl(root: &Path, existing: bool) -> Result<Self> {
         std::fs::create_dir_all(root)
             .with_context(|| format!("failed to create store root: {}", root.display()))?;
 
         let content = ContentStore::open(root)?;
         let db_path = root.join("metadata.redb");
-        let metadata = MetadataDb::open(&db_path)?;
+        let metadata = if existing {
+            MetadataDb::open_existing(&db_path)?
+        } else {
+            MetadataDb::open(&db_path)?
+        };
 
         Ok(Self {
             content,
@@ -163,7 +228,7 @@ impl Store {
 
     /// Read the content of a file by its virtual path.
     ///
-    /// Resolves path → CID → decompressed blob.
+    /// Resolves path → whole-file CID → verified reconstructed content.
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         let meta = self
             .metadata
@@ -195,16 +260,67 @@ impl Store {
         self.metadata.find_all_duplicates()
     }
 
-    /// Compute per-extension statistics across all files.
+    /// Compute per-extension statistics across all files. Shared payload bytes
+    /// are split equally among referencing extensions, with deterministic rounding.
     pub fn extension_stats(&self) -> Result<Vec<ExtensionStats>> {
-        self.metadata.extension_stats()
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut stats = self.metadata.extension_stats()?;
+        let snapshot = self.metadata.snapshot()?;
+        let mut payloads: BTreeMap<String, (u64, BTreeSet<String>)> = BTreeMap::new();
+        let mut seen = BTreeSet::new();
+        for (path, meta) in snapshot.files {
+            let ext = path
+                .rsplit('/')
+                .next()
+                .and_then(|name| name.rsplit_once('.'))
+                .map(|(_, ext)| ext.to_lowercase())
+                .filter(|ext| !ext.is_empty())
+                .unwrap_or_else(|| "(no ext)".to_owned());
+            let cid = cid::cid_from_bytes(&meta.cid)?;
+            if !seen.insert((ext.clone(), cid)) {
+                continue;
+            }
+            for (key, bytes) in self.content.storage_entries(&cid)? {
+                payloads
+                    .entry(key)
+                    .or_insert_with(|| (bytes, BTreeSet::new()))
+                    .1
+                    .insert(ext.clone());
+            }
+        }
+        let mut allocated: BTreeMap<String, u64> = BTreeMap::new();
+        for (_, (bytes, owners)) in payloads {
+            let count = owners.len() as u64;
+            for (index, ext) in owners.into_iter().enumerate() {
+                *allocated.entry(ext).or_default() +=
+                    bytes / count + u64::from((index as u64) < bytes % count);
+            }
+        }
+        for row in &mut stats {
+            row.total_stored_bytes = allocated.get(&row.extension).copied().unwrap_or(0);
+            row.bytes_saved = row
+                .total_original_bytes
+                .saturating_sub(row.total_stored_bytes);
+        }
+        Ok(stats)
     }
 
     /// Compute aggregate statistics for the entire store.
     ///
     /// Returns (total_files, total_dirs, unique_blobs, duplicate_files,
     /// total_original_bytes, total_stored_bytes).
+    /// Stored bytes count referenced payloads and manifests once, excluding
+    /// database allocation overhead and unreferenced historical content.
     pub fn compute_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64)> {
-        self.metadata.compute_stats()
+        let (files, dirs, unique, duplicates, original, _) = self.metadata.compute_stats()?;
+        let cids = self
+            .metadata
+            .snapshot()?
+            .files
+            .into_iter()
+            .map(|(_, meta)| cid::cid_from_bytes(&meta.cid))
+            .collect::<Result<Vec<_>>>()?;
+        let stored = self.content.referenced_size(cids)?;
+        Ok((files, dirs, unique, duplicates, original, stored))
     }
 }

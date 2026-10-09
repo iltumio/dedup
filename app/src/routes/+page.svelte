@@ -10,6 +10,7 @@
   import AppShell, { type View } from "$lib/components/AppShell.svelte";
   import Icon from "$lib/components/ui/Icon.svelte";
   import WorkspaceManagerDialog from "$lib/components/workspace/WorkspaceManagerDialog.svelte";
+  import WorkspaceMigrationDialog from "$lib/components/workspace/WorkspaceMigrationDialog.svelte";
   import {
     listWorkspaces,
     createWorkspace,
@@ -22,6 +23,7 @@
     pickFile,
     type DirEntry,
     type Workspace,
+    type StorageFormat,
   } from "$lib/api/tauri";
   import { app } from "$lib/state/app.svelte";
   let selectedPath = $state<string | null>(null);
@@ -29,10 +31,12 @@
   let browserPath = $state("/");
   let currentView = $state<View>("files");
   let showWorkspaceDialog = $state(false);
+  let showMigrationDialog = $state(false);
   let workspaceDialogMode = $state<"list" | "create" | "import">("list");
   let newWsLabel = $state("");
   let newWsTags = $state("");
   let newWsStorePath = $state("");
+  let newWsFormat = $state<StorageFormat>("fastcdc");
   let importWsStorePath = $state("");
   let importWsLabel = $state("");
   let wsError = $state<string | null>(null);
@@ -63,7 +67,7 @@
     if (app.scanning) currentView = "activity";
   });
   async function workspaceTask(operation: () => Promise<void>) {
-    if (workspaceBusy || app.scanning) return;
+    if (workspaceBusy || app.scanning || app.migrating) return;
     workspaceBusy = true;
     wsError = null;
     try {
@@ -82,8 +86,26 @@
     browserPath = "/";
     app.treeRefreshKey++;
   }
+  function openMigration(id: string) {
+    const workspace = app.workspacesConfig.workspaces.find(w => w.id === id);
+    if (!workspace || app.scanning || app.migrating) return;
+    showWorkspaceDialog = false;
+    showMigrationDialog = true;
+    void app.prepareMigration(workspace);
+  }
+  function backFromMigration() {
+    showMigrationDialog = false;
+    showWorkspaceDialog = true;
+  }
+  async function openMigratedArchive(id: string) {
+    await workspaceTask(async () => {
+      await activate(id);
+      showMigrationDialog = false;
+    });
+    if (wsError && app.migration) app.migration.error = wsError;
+  }
   function openWorkspaceManager() {
-    if (workspaceBusy || app.scanning) return;
+    if (workspaceBusy || app.scanning || app.migrating) return;
     wsError = null;
     workspaceDialogMode = "list";
     showWorkspaceDialog = true;
@@ -92,6 +114,7 @@
     newWsLabel = "";
     newWsTags = "";
     newWsStorePath = "";
+    newWsFormat = "fastcdc";
     wsError = null;
     workspaceDialogMode = "create";
     showWorkspaceDialog = true;
@@ -113,6 +136,7 @@
           .map((t) => t.trim())
           .filter(Boolean),
         newWsStorePath.trim(),
+        newWsFormat,
       );
       await activate(ws.id);
       showWorkspaceDialog = false;
@@ -252,7 +276,7 @@
     currentView = "files";
   }
   function goToScan(target?: string) {
-    if (app.scanning) return;
+    if (app.scanning || app.migrating) return;
     app.prepareScan(target);
     void goto("/scan");
   }
@@ -275,7 +299,7 @@
       <UiSelect
         class="archive-switch"
         label="Current archive"
-        disabled={workspaceBusy || app.scanning || !app.hasWorkspace}
+        disabled={workspaceBusy || app.scanning || app.migrating || !app.hasWorkspace}
         value={app.workspacesConfig.active_workspace_id ?? ""}
         onValueChange={handleSwitchWorkspace}
         placeholder="No archive yet"
@@ -287,7 +311,7 @@
         class="icon-button"
         type="button"
         aria-label="Manage archives"
-        disabled={workspaceBusy || app.scanning}
+        disabled={workspaceBusy || app.scanning || app.migrating}
         onclick={openWorkspaceManager}
         ><Icon name="settings" size={17} /></button
       >
@@ -299,12 +323,13 @@
     mode={workspaceDialogMode}
     error={wsError}
     importing={workspaceBusy}
-    busy={workspaceBusy}
+    busy={workspaceBusy || app.migrating}
     removedLabel={removedWorkspace?.label}
     onUndo={undoRemoval}
     newLabel={newWsLabel}
     newTags={newWsTags}
     newStorePath={newWsStorePath}
+    newFormat={newWsFormat}
     importLabel={importWsLabel}
     importStorePath={importWsStorePath}
     onClose={() => {
@@ -313,6 +338,7 @@
     onModeChange={handleWorkspaceModeChange}
     onSwitch={handleSwitchWorkspace}
     onDelete={handleDeleteWorkspace}
+    onMigrate={openMigration}
     onExport={handleExportWorkspaces}
     onImportConfig={handleImportWorkspaces}
     onCreate={handleCreateWorkspace}
@@ -320,6 +346,7 @@
     onNewLabelChange={(value) => (newWsLabel = value)}
     onNewTagsChange={(value) => (newWsTags = value)}
     onNewStorePathChange={(value) => (newWsStorePath = value)}
+    onNewFormatChange={(value) => (newWsFormat = value)}
     onImportLabelChange={(value) => (importWsLabel = value)}
     onImportStorePathChange={(value) => (importWsStorePath = value)}
     onBrowseNewStore={browseNewStore}
@@ -433,4 +460,6 @@
         </div>{/if}
     {/key}
   {/if}
+  <WorkspaceMigrationDialog open={showMigrationDialog}
+    onClose={() => showMigrationDialog = false} onBack={backFromMigration} onOpenArchive={openMigratedArchive} />
 </AppShell>

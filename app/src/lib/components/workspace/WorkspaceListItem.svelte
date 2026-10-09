@@ -6,11 +6,15 @@
     active,
     onSelect,
     onDelete,
+    onMigrate,
+    pendingMigration = false,
   }: {
     workspace: Workspace;
     active: boolean;
     onSelect: (id: string) => void;
     onDelete: (id: string) => void;
+    onMigrate: (id: string) => void;
+    pendingMigration?: boolean;
   } = $props();
 </script>
 
@@ -36,6 +40,9 @@
   </div>
   <details class="mt-3">
     <summary class="muted text-xs py-2">Archive options</summary>
+    <button class="btn btn-sm mb-3" type="button" onclick={() => onMigrate(workspace.id)}>
+      {pendingMigration ? "Resume migration" : "Migrate to FastCDC"}
+    </button>
     <p class="muted text-sm mb-2">
       Removing this archive from the list keeps all its data on disk.
     </p>

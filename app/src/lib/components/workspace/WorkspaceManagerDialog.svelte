@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { WorkspacesConfig } from "$lib/api/tauri";
+  import type { StorageFormat, WorkspacesConfig } from "$lib/api/tauri";
   import { UiButton, UiDialog, UiEmptyState } from "$lib/components/ui";
   import WorkspaceForm from "./WorkspaceForm.svelte";
   import WorkspaceListItem from "./WorkspaceListItem.svelte";
@@ -18,12 +18,14 @@
     newLabel: string;
     newTags: string;
     newStorePath: string;
+    newFormat: StorageFormat;
     importLabel: string;
     importStorePath: string;
     onClose: () => void;
     onModeChange: (mode: Mode) => void;
     onSwitch: (id: string) => void;
     onDelete: (id: string) => void;
+    onMigrate: (id: string) => void;
     onExport: () => void;
     onImportConfig: () => void;
     onCreate: () => void;
@@ -31,6 +33,7 @@
     onNewLabelChange: (value: string) => void;
     onNewTagsChange: (value: string) => void;
     onNewStorePathChange: (value: string) => void;
+    onNewFormatChange: (value: StorageFormat) => void;
     onImportLabelChange: (value: string) => void;
     onImportStorePathChange: (value: string) => void;
     onBrowseNewStore: () => void;
@@ -50,12 +53,14 @@
     newLabel,
     newTags,
     newStorePath,
+    newFormat,
     importLabel,
     importStorePath,
     onClose,
     onModeChange,
     onSwitch,
     onDelete,
+    onMigrate,
     onExport,
     onImportConfig,
     onCreate,
@@ -63,6 +68,7 @@
     onNewLabelChange,
     onNewTagsChange,
     onNewStorePathChange,
+    onNewFormatChange,
     onImportLabelChange,
     onImportStorePathChange,
     onBrowseNewStore,
@@ -82,6 +88,7 @@
         label={newLabel}
         tags={newTags}
         storePath={newStorePath}
+        format={newFormat}
         loading={busy}
         {error}
         onBack={() => onModeChange("list")}
@@ -89,6 +96,7 @@
         onLabelChange={onNewLabelChange}
         onTagsChange={onNewTagsChange}
         onStorePathChange={onNewStorePathChange}
+        onFormatChange={onNewFormatChange}
         onBrowseFolder={onBrowseNewStore}
       />
     {:else if mode === "import"}
@@ -120,6 +128,8 @@
                 active={workspace.id === config.active_workspace_id}
                 onSelect={onSwitch}
                 {onDelete}
+                {onMigrate}
+                pendingMigration={config.pending_migrations?.some(p => p.workspace_id === workspace.id) ?? false}
               />
             {/each}
           </ul>

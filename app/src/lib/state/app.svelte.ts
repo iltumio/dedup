@@ -1,4 +1,10 @@
 import {
+  migrateWorkspace,
+  cancelMigration,
+  onMigrationProgress,
+  workspaceStorageFormat,
+  type MigrationProgress,
+  type Workspace,
   scanDirectory,
   cancelScan,
   onScanProgress,
@@ -28,7 +34,90 @@ export interface ScanActivity {
   error: string | null;
 }
 
+export interface MigrationActivity {
+  workspace: Workspace;
+  destination: string;
+  label: string;
+  jobId: string;
+  workers: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  lastProgressAt: number | null;
+  status: "ready" | "running" | "completed" | "cancelled" | "failed";
+  progress: MigrationProgress | null;
+  result: Workspace | null;
+  error: string | null;
+}
+
 class AppState {
+  migration = $state<MigrationActivity | null>(null);
+  migrating = $state(false);
+  cancellingMigration = $state(false);
+  migrationFormat = $state<number | null>(null);
+  checkingMigration = $state(false);
+
+  prepareMigration = async (workspace: Workspace) => {
+    if (this.migrating || this.scanning) return;
+    const pending = this.workspacesConfig.pending_migrations?.find(p => p.workspace_id === workspace.id);
+    this.migration = {
+      workspace, destination: pending?.destination ?? `${workspace.store_path}-fastcdc`,
+      label: pending?.label ?? `${workspace.label} (FastCDC)`, jobId: "", workers: 4, startedAt: null, finishedAt: null, lastProgressAt: null,
+      status: pending ? "cancelled" : "ready", progress: null, result: null, error: null,
+    };
+    this.migrationFormat = null;
+    this.checkingMigration = true;
+    try { this.migrationFormat = await workspaceStorageFormat(workspace.id); }
+    catch (e) { this.migration.error = String(e); }
+    finally { this.checkingMigration = false; }
+  };
+
+  runMigration = async () => {
+    const activity = this.migration;
+    if (!activity || this.migrating || this.scanning || this.checkingMigration
+        || this.migrationFormat !== 1 || !activity.destination.trim() || !activity.label.trim()
+        || !Number.isInteger(activity.workers) || activity.workers < 1 || activity.workers > 32) return;
+    activity.jobId = crypto.randomUUID();
+    activity.status = "running";
+    activity.error = null;
+    activity.progress = null;
+    activity.startedAt = Date.now();
+    activity.finishedAt = null;
+    activity.lastProgressAt = null;
+    this.migrating = true;
+    this.cancellingMigration = false;
+    let unlisten: UnlistenFn | undefined;
+    try {
+      unlisten = await onMigrationProgress(activity.jobId, progress => {
+        if (activity.status !== "running" || this.migration?.jobId !== activity.jobId) return;
+        activity.progress = progress;
+        activity.lastProgressAt = Date.now();
+      });
+      if (this.cancellingMigration) {
+        activity.status = "cancelled";
+        return;
+      }
+      activity.result = await migrateWorkspace(activity.workspace.id, activity.destination.trim(), activity.label.trim(), activity.jobId, activity.workers);
+      activity.status = "completed";
+    } catch (e) {
+      const message = String(e);
+      activity.status = message.includes("migration cancelled") ? "cancelled" : "failed";
+      activity.error = activity.status === "failed" ? message : null;
+    } finally {
+      unlisten?.();
+      activity.finishedAt = Date.now();
+      this.migrating = false;
+      this.cancellingMigration = false;
+      await this.loadWorkspaces();
+    }
+  };
+
+  requestMigrationCancel = async () => {
+    if (!this.migrating || !this.migration) return;
+    this.cancellingMigration = true;
+    try { await cancelMigration(this.migration.jobId); }
+    catch (e) { this.migration.error = String(e); this.cancellingMigration = false; }
+  };
+
   theme = $state<"system" | "light" | "dark">("system");
   setTheme = (theme: "system" | "light" | "dark") => {
     this.theme = theme;
@@ -115,7 +204,7 @@ class AppState {
   // ── Scan form actions ──
 
   prepareScan = (presetTarget?: string) => {
-    if (this.scanning) return;
+    if (this.scanning || this.migrating) return;
     this.targetPath = presetTarget ?? "/";
     this.bundleGitDirs = false;
     this.ignoreRustTarget = false;
@@ -241,7 +330,7 @@ class AppState {
 
   runScan = async (): Promise<void> => {
     if (
-      this.scanning ||
+      this.scanning || this.migrating ||
       !this.hasWorkspace ||
       !this.scanSource.trim() ||
       this.savingCustomRules

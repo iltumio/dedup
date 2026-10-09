@@ -3,6 +3,7 @@
 
 mod commands;
 mod file_open;
+mod migration;
 mod workspace;
 
 use commands::AppState;
@@ -38,6 +39,9 @@ fn main() {
             commands::import_workspaces,
             commands::get_extension_stats,
             commands::import_workspace,
+            migration::workspace_storage_format,
+            migration::migrate_workspace,
+            migration::cancel_migration,
         ])
         .run(tauri::generate_context!())
         .expect("error while running dedup app");

@@ -55,6 +55,13 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingMigration {
+    pub workspace_id: String,
+    pub destination: String,
+    pub label: String,
+}
+
 /// The workspaces config file format.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspacesConfig {
@@ -63,6 +70,8 @@ pub struct WorkspacesConfig {
     pub active_workspace_id: Option<String>,
     #[serde(default)]
     pub custom_scan_rules: Vec<CustomScanRule>,
+    #[serde(default)]
+    pub pending_migrations: Vec<PendingMigration>,
 }
 
 impl WorkspacesConfig {
@@ -219,6 +228,7 @@ mod tests {
         let config = WorkspacesConfig {
             workspaces: Vec::new(),
             active_workspace_id: Some("workspace-1".to_string()),
+            pending_migrations: Vec::new(),
             custom_scan_rules: vec![custom_rule("rule-1", "\\.tmp$")],
         };
 
@@ -242,6 +252,7 @@ mod tests {
         let original = WorkspacesConfig {
             workspaces: Vec::new(),
             active_workspace_id: Some("original".to_string()),
+            pending_migrations: Vec::new(),
             custom_scan_rules: vec![custom_rule("original-rule", "original")],
         };
         original
@@ -254,6 +265,7 @@ mod tests {
         let replacement = WorkspacesConfig {
             workspaces: Vec::new(),
             active_workspace_id: Some("replacement".to_string()),
+            pending_migrations: Vec::new(),
             custom_scan_rules: vec![custom_rule("replacement-rule", "replacement")],
         };
 

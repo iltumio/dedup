@@ -163,6 +163,7 @@ export interface CustomScanRule {
 }
 
 export interface WorkspacesConfig {
+	pending_migrations?: PendingMigration[];
 	workspaces: Workspace[];
 	active_workspace_id: string | null;
 	custom_scan_rules: CustomScanRule[];
@@ -180,12 +181,15 @@ export async function saveCustomScanRules(rules: CustomScanRule[]): Promise<Cust
 	return invoke('save_custom_scan_rules', { rules });
 }
 
+export type StorageFormat = 'legacy' | 'fastcdc';
+
 export async function createWorkspace(
 	label: string,
 	tags: string[],
-	storePath: string
+	storePath: string,
+	format: StorageFormat = 'fastcdc'
 ): Promise<Workspace> {
-	return invoke('create_workspace', { label, tags, storePath });
+	return invoke('create_workspace', { label, tags, storePath, format });
 }
 
 export async function switchWorkspace(workspaceId: string): Promise<Workspace> {
@@ -206,4 +210,43 @@ export async function importWorkspaces(json: string): Promise<WorkspacesConfig> 
 
 export async function importWorkspace(storePath: string, label: string): Promise<Workspace> {
 	return invoke('import_workspace', { storePath, label });
+}
+
+export interface PendingMigration {
+    workspace_id: string;
+    destination: string;
+    label: string;
+}
+
+export interface MigrationProgress {
+    unique_files: number;
+    resumed_files: number;
+    total_unique_files: number;
+    bytes_processed: number;
+    total_bytes: number;
+    work_bytes: number;
+    elapsed_seconds: number;
+    rate_bytes_per_second: number;
+    idle_seconds: number;
+    workers: number;
+    phase: 'preparing' | 'migrating' | 'finalizing' | 'completed';
+    active_files: { path: string; stage: 'converting' | 'verifying' | 'saving_checkpoint'; bytes_processed: number; total_bytes: number }[];
+}
+
+export function workspaceStorageFormat(workspaceId: string): Promise<number> {
+    return invoke('workspace_storage_format', { workspaceId });
+}
+
+export function migrateWorkspace(workspaceId: string, destination: string, label: string, jobId: string, workers: number): Promise<Workspace> {
+    return invoke('migrate_workspace', { workspaceId, destination, label, jobId, workers });
+}
+
+export function cancelMigration(jobId: string): Promise<void> {
+    return invoke('cancel_migration', { jobId });
+}
+
+export function onMigrationProgress(jobId: string, callback: (progress: MigrationProgress) => void): Promise<UnlistenFn> {
+    return listen<{job_id: string; progress: MigrationProgress}>('migration-progress', (event) => {
+        if (event.payload.job_id === jobId) callback(event.payload.progress);
+    });
 }

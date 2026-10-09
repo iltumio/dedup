@@ -5,7 +5,8 @@ use std::sync::{
 };
 
 use dedup_core::{
-    DirEntry, ExtensionStats, FileMetadata, ScanOptions, ScanProgress, ScanRule, ScanStats, Store,
+    DirEntry, ExtensionStats, FileMetadata, ScanOptions, ScanProgress, ScanRule, ScanStats,
+    StorageFormat, Store,
 };
 use regex::Regex;
 use tauri::{AppHandle, Emitter, State};
@@ -19,6 +20,9 @@ pub struct AppState {
     pub store_path: Arc<Mutex<PathBuf>>,
     pub workspaces: Arc<Mutex<WorkspacesConfig>>,
     pub scan_cancelled: Arc<AtomicBool>,
+    pub operation_running: Arc<AtomicBool>,
+    pub migration_cancelled: Arc<AtomicBool>,
+    pub migration_job: Arc<Mutex<Option<String>>>,
     pub config_path: PathBuf,
 }
 
@@ -35,12 +39,15 @@ impl AppState {
             store_path: Arc::new(Mutex::new(initial_store_path)),
             workspaces: Arc::new(Mutex::new(config)),
             scan_cancelled: Arc::new(AtomicBool::new(false)),
+            operation_running: Arc::new(AtomicBool::new(false)),
+            migration_cancelled: Arc::new(AtomicBool::new(false)),
+            migration_job: Arc::new(Mutex::new(None)),
             config_path,
         }
     }
 
     /// Keep filesystem I/O and mutex waits off both the UI and async executor.
-    async fn run_blocking<T, F>(&self, operation: F) -> Result<T, String>
+    pub(crate) async fn run_blocking<T, F>(&self, operation: F) -> Result<T, String>
     where
         T: Send + 'static,
         F: FnOnce(&Self) -> Result<T, String> + Send + 'static,
@@ -67,7 +74,10 @@ impl AppState {
         config.save(&self.config_path)
     }
 
-    fn update_config_transactionally<F>(&self, update: F) -> Result<WorkspacesConfig, String>
+    pub(crate) fn update_config_transactionally<F>(
+        &self,
+        update: F,
+    ) -> Result<WorkspacesConfig, String>
     where
         F: FnOnce(&mut WorkspacesConfig) -> Result<(), String>,
     {
@@ -236,6 +246,7 @@ pub async fn scan_directory(
     bundle_git_dirs: Option<bool>,
     rules: Option<Vec<ScanRule>>,
 ) -> Result<ScanStats, String> {
+    let _operation = crate::migration::OperationGuard::acquire(&state)?;
     let bundle_git_dirs = bundle_git_dirs.unwrap_or(false);
     let mut rules = rules.unwrap_or_default();
     if bundle_git_dirs {
@@ -378,12 +389,34 @@ pub fn save_custom_scan_rules(
 }
 
 #[tauri::command]
-pub fn create_workspace(
+pub async fn create_workspace(
     state: State<'_, AppState>,
     label: String,
     tags: Vec<String>,
     store_path: String,
+    format: Option<StorageFormat>,
 ) -> Result<Workspace, String> {
+    state
+        .run_blocking(move |state| {
+            create_archive(state, label, tags, store_path, format.unwrap_or_default())
+        })
+        .await
+}
+
+fn create_archive(
+    state: &AppState,
+    label: String,
+    tags: Vec<String>,
+    store_path: String,
+    format: StorageFormat,
+) -> Result<Workspace, String> {
+    let _operation = crate::migration::OperationGuard::acquire(state)?;
+    let label = label.trim().to_owned();
+    let store_path = store_path.trim().to_owned();
+    if label.is_empty() || store_path.is_empty() {
+        return Err("Choose an archive name and an empty destination folder.".into());
+    }
+    drop(Store::create(std::path::Path::new(&store_path), format).map_err(|e| e.to_string())?);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -398,16 +431,14 @@ pub fn create_workspace(
         stats: Default::default(),
     };
 
-    {
-        let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
+    state.update_config_transactionally(|config| {
         config.workspaces.push(ws.clone());
         // Auto-activate if it's the only workspace
         if config.workspaces.len() == 1 {
             config.active_workspace_id = Some(ws.id.clone());
         }
-    }
-
-    state.save_config()?;
+        Ok(())
+    }).map_err(|e| format!("Archive created at {}, but it could not be added to the list: {e}. Use Open existing to add it.", ws.store_path))?;
     Ok(ws)
 }
 
@@ -418,6 +449,7 @@ pub async fn switch_workspace(
 ) -> Result<Workspace, String> {
     state
         .run_blocking(move |state| {
+            let _operation = crate::migration::OperationGuard::acquire(state)?;
             let ws = {
                 let mut config = state.workspaces.lock().map_err(|e| e.to_string())?;
                 let ws = config
@@ -593,6 +625,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn archive_creation_initializes_requested_format_and_registers_only_valid_locations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.json");
+        let state = AppState::new(config_path.clone());
+        for (format, version) in [(StorageFormat::Legacy, 1), (StorageFormat::Fastcdc, 2)] {
+            let path = tmp.path().join(format!("archive-{version}"));
+            let ws = create_archive(
+                &state,
+                "  Photos  ".into(),
+                vec!["backup".into()],
+                path.to_string_lossy().into(),
+                format,
+            )
+            .unwrap();
+            assert_eq!(ws.label, "Photos");
+            let store = Store::open_existing(&path).unwrap();
+            assert_eq!(store.content.format_version(), version);
+            drop(store);
+            let reloaded = AppState::new(config_path.clone());
+            assert!(reloaded
+                .workspaces
+                .lock()
+                .unwrap()
+                .workspaces
+                .iter()
+                .any(|saved| saved.id == ws.id));
+            let before = std::fs::read(&config_path).unwrap();
+            assert!(create_archive(
+                &state,
+                "Other".into(),
+                vec![],
+                ws.store_path,
+                StorageFormat::Fastcdc
+            )
+            .is_err());
+            assert_eq!(std::fs::read(&config_path).unwrap(), before);
+        }
+        assert_eq!(state.workspaces.lock().unwrap().workspaces.len(), 2);
+        let first = state.workspaces.lock().unwrap().workspaces[0].id.clone();
+        assert_eq!(
+            state
+                .workspaces
+                .lock()
+                .unwrap()
+                .active_workspace_id
+                .as_deref(),
+            Some(first.as_str())
+        );
+    }
+
+    #[test]
+    fn failed_registration_keeps_a_valid_archive_and_restores_configuration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config-directory");
+        std::fs::create_dir(&config_dir).unwrap();
+        let state = AppState::new(config_dir);
+        let archive = tmp.path().join("archive");
+        let error = create_archive(
+            &state,
+            "Photos".into(),
+            vec![],
+            archive.to_string_lossy().into(),
+            StorageFormat::Legacy,
+        )
+        .unwrap_err();
+        assert!(error.contains("Open existing"));
+        assert!(state.workspaces.lock().unwrap().workspaces.is_empty());
+        assert!(state
+            .workspaces
+            .lock()
+            .unwrap()
+            .active_workspace_id
+            .is_none());
+        assert_eq!(
+            Store::open_existing(&archive)
+                .unwrap()
+                .content
+                .format_version(),
+            1
+        );
+    }
+
+    #[test]
     fn store_commands_do_not_block_ipc_dispatch() {
         use std::sync::mpsc;
         use std::time::{Duration, Instant};
@@ -741,6 +856,7 @@ mod tests {
     #[test]
     fn merge_custom_scan_rules_replaces_existing_rules_by_id_and_appends_new_rules() {
         let mut config = WorkspacesConfig {
+            pending_migrations: Vec::new(),
             workspaces: Vec::new(),
             active_workspace_id: None,
             custom_scan_rules: vec![

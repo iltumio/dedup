@@ -178,7 +178,7 @@ enum WriteOp {
         cid_str: String,
         preexisting: bool,
         original_size: u64,
-        compressed_size: u64,
+        new_bytes: u64,
     },
     Dir {
         virtual_path: String,
@@ -1167,16 +1167,17 @@ where
             cid_str,
             preexisting,
             original_size,
-            compressed_size,
+            new_bytes,
         } => {
             if preexisting {
                 state.stats.duplicate_files += 1;
             } else if state.cid_strings.insert(cid_str.clone()) {
                 state.stats.unique_blobs += 1;
-                state.stats.total_stored_bytes += compressed_size;
             } else {
                 state.stats.duplicate_files += 1;
             }
+
+            state.stats.total_stored_bytes += new_bytes;
 
             state
                 .metadata_batch
@@ -1307,7 +1308,7 @@ fn store_file_write_op(context: FileTaskContext<'_>) {
         permissions,
         content_store,
     ) {
-        Ok((meta, cid_str, preexisting, original_size, compressed_size)) => {
+        Ok((meta, cid_str, preexisting, original_size, new_bytes)) => {
             send_write_op(
                 &sender,
                 &cancel_flag,
@@ -1317,7 +1318,7 @@ fn store_file_write_op(context: FileTaskContext<'_>) {
                     cid_str,
                     preexisting,
                     original_size,
-                    compressed_size,
+                    new_bytes,
                 },
             );
         }
@@ -1400,7 +1401,7 @@ fn store_archive_write_op(context: ArchiveTaskContext<'_>) {
         0o644,
         content_store,
     ) {
-        Ok((meta, cid_str, preexisting, original_size, compressed_size)) => {
+        Ok((meta, cid_str, preexisting, original_size, new_bytes)) => {
             send_write_op(
                 &sender,
                 &cancel_flag,
@@ -1410,7 +1411,7 @@ fn store_archive_write_op(context: ArchiveTaskContext<'_>) {
                     cid_str,
                     preexisting,
                     original_size,
-                    compressed_size,
+                    new_bytes,
                 },
             );
         }
@@ -1438,10 +1439,11 @@ fn store_parallel_file_data(
 ) -> Result<(FileMetadata, String, bool, u64, u64)> {
     let cid = cid_util::compute_cid(data);
     let cid_str = cid_util::cid_to_string(&cid);
-    let preexisting = content_store.exists(&cid);
-    let compressed_size = content_store
-        .store(&cid, data)
+    let stored = content_store
+        .store_detailed(&cid, data)
         .with_context(|| format!("failed to store blob for: {virtual_path}"))?;
+    let preexisting = !stored.new_file;
+    let compressed_size = stored.compressed_size;
     let original_size = data.len() as u64;
     let meta = FileMetadata {
         cid: cid_util::cid_to_bytes(&cid),
@@ -1452,7 +1454,7 @@ fn store_parallel_file_data(
         permissions,
     };
 
-    Ok((meta, cid_str, preexisting, original_size, compressed_size))
+    Ok((meta, cid_str, preexisting, original_size, stored.new_bytes))
 }
 
 fn virtual_path_for(prefix: &str, rel_str: &str) -> Option<String> {
@@ -1728,14 +1730,14 @@ where
     let cid = cid_util::compute_cid(data);
     let cid_str = cid_util::cid_to_string(&cid);
 
-    let was_new = !content_store.exists(&cid);
-    let compressed_size = content_store
-        .store(&cid, data)
+    let stored = content_store
+        .store_detailed(&cid, data)
         .with_context(|| format!("failed to store blob for: {virtual_path}"))?;
 
-    if was_new {
+    let compressed_size = stored.compressed_size;
+    stats.total_stored_bytes += stored.new_bytes;
+    if stored.new_file {
         stats.unique_blobs += 1;
-        stats.total_stored_bytes += compressed_size;
     } else {
         stats.duplicate_files += 1;
     }

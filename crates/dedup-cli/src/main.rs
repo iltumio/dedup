@@ -15,6 +15,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Migrate a legacy archive to FastCDC in a separate directory. Re-run to resume.
+    Migrate {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+        /// Number of files to convert concurrently (1–32). May change on resume.
+        #[arg(long, default_value_t = 4)]
+        workers: usize,
+        /// Minimum chunk size in bytes.
+        #[arg(long, default_value_t = 16384)]
+        min_chunk_size: u32,
+        /// Target chunk size in bytes (power of two).
+        #[arg(long, default_value_t = 65536)]
+        avg_chunk_size: u32,
+        /// Maximum chunk size in bytes.
+        #[arg(long, default_value_t = 262144)]
+        max_chunk_size: u32,
+    },
     /// Scan a source directory and store files in content-addressed format.
     Scan {
         /// Source directory to scan.
@@ -106,6 +125,45 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Migrate {
+            source,
+            destination,
+            workers,
+            min_chunk_size,
+            avg_chunk_size,
+            max_chunk_size,
+        } => {
+            let progress = dedup_core::migration::migrate_with_options(
+                &source,
+                &destination,
+                dedup_core::ChunkingProfile {
+                    version: 1,
+                    min_size: min_chunk_size,
+                    avg_size: avg_chunk_size,
+                    max_size: max_chunk_size,
+                },
+                dedup_core::migration::MigrationOptions { workers },
+                |progress| {
+                    eprint!(
+                        "\r  Verified {}/{} files ({}); {} active; processing {}/s; {:.0}s elapsed...",
+                        progress.unique_files,
+                        progress.total_unique_files,
+                        format_size(progress.bytes_processed),
+                        progress.active_files.len(),
+                        format_size(progress.rate_bytes_per_second as u64),
+                        progress.elapsed_seconds,
+                    )
+                },
+                || false,
+            )?;
+            eprintln!();
+            println!(
+                "Migration complete: {} unique files ({} resumed).",
+                progress.unique_files, progress.resumed_files
+            );
+            println!("FastCDC store: {}", destination.display());
+            Ok(())
+        }
         Commands::Scan {
             source,
             store,
@@ -255,7 +313,7 @@ fn cmd_scan(
     println!("Scan complete!");
     println!("  Files:           {}", stats.total_files);
     println!("  Directories:     {}", stats.total_dirs);
-    println!("  Unique blobs:    {}", stats.unique_blobs);
+    println!("  Unique files:    {}", stats.unique_blobs);
     println!("  Duplicate files: {}", stats.duplicate_files);
     println!("  Unchanged files: {}", stats.unchanged_files);
     println!("  Pruned entries:  {}", stats.pruned_entries);

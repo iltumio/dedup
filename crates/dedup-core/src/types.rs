@@ -7,7 +7,8 @@ pub struct FileMetadata {
     pub cid: Vec<u8>,
     /// Original uncompressed file size in bytes.
     pub original_size: u64,
-    /// Compressed blob size on disk in bytes.
+    /// Logical compressed content size (distinct chunks + manifest in v2).
+    /// Shared content must be counted once when computing aggregate storage.
     pub compressed_size: u64,
     /// Last modification time as unix timestamp (seconds).
     pub modified: i64,
@@ -46,13 +47,14 @@ pub struct ScanStats {
     pub total_files: u64,
     /// Total directories discovered during scan.
     pub total_dirs: u64,
-    /// Number of unique content blobs stored (after dedup).
+    /// Number of unique whole-file CIDs stored (after exact-file dedup).
     pub unique_blobs: u64,
     /// Number of duplicate files detected.
     pub duplicate_files: u64,
     /// Total bytes before deduplication + compression.
     pub total_original_bytes: u64,
-    /// Total bytes after deduplication + compression.
+    /// Newly published compressed payload + manifest bytes during this scan.
+    /// Excludes database allocation overhead and unchanged historical content.
     pub total_stored_bytes: u64,
     /// Number of files skipped due to read errors.
     pub skipped_files: u64,
