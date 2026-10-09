@@ -13,7 +13,9 @@ use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::content_store::{lock_file, sync_dir};
-use crate::{cid, ChunkingProfile, ContentStore, FileMetadata, MetadataDb, Store};
+use crate::{
+    cid, ChunkingProfile, ContentStore, FileMetadata, MetadataDb, StorageStatsProgress, Store,
+};
 
 const STATE_FILE: &str = "migration.bin";
 const LOCK_FILE: &str = ".migration.lock";
@@ -81,6 +83,8 @@ pub struct MigrationProgress {
     pub workers: usize,
     pub phase: MigrationPhase,
     pub active_files: Vec<MigrationFileProgress>,
+    /// Actual work completed while calculating the destination's final totals.
+    pub finalization: Option<StorageStatsProgress>,
 }
 
 #[derive(Serialize, Deserialize)]

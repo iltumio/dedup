@@ -534,6 +534,35 @@ test("migration distinguishes responding updates from stalled data and missing u
   await expect(page.getByRole("heading", { name: "Migration stopped", exact: true })).toBeVisible();
 });
 
+test("migration reports real archive totals progress without resizing the dialog", async ({ page }) => {
+  await fixture(page);
+  await startMigration(page);
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration({ phase: "finalizing", active_files: [] }));
+  const dialog = page.getByRole("dialog", { name: "Migration in progress", exact: true });
+  const box = dialog.locator(".modal-box");
+  const initial = await box.boundingBox();
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration({
+    phase: "finalizing", active_files: [],
+    finalization: { phase: "reading_manifests", processed: 3, total: 4 },
+  }));
+  await expect(dialog.getByText("Reading archive index…", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("3 of 4 unique files counted", { exact: true })).toBeVisible();
+  await page.evaluate(() => (window as any).__dedupTest.emitMigration({
+    phase: "finalizing", active_files: [],
+    finalization: { phase: "counting_blobs", processed: 25, total: 100 },
+  }));
+  await expect(dialog.getByText("Calculating stored size…", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("25 of 100 chunks counted", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("progressbar", { name: "Archive totals progress" })).toHaveAttribute("value", "25");
+  await expect(dialog.getByRole("progressbar", { name: "Archive totals progress" })).toHaveAttribute("max", "100");
+  await expect(dialog.getByRole("button", { name: "Stop migration", exact: true })).toBeInViewport();
+  const current = await box.boundingBox();
+  expect(current?.height).toBe(initial?.height);
+  expect(current?.width).toBe(initial?.width);
+  const accessibility = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
+  expect(accessibility.violations).toEqual([]);
+});
+
 test("archive creation offers the original format and resets the choice for the next archive", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 500 });
   await fixture(page, true);

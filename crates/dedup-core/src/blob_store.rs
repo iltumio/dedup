@@ -1,5 +1,6 @@
 //! Physical blob layout, verified deduplication and atomic publication.
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -96,6 +97,8 @@ pub(crate) struct BlobStore {
     // Publication and cache entries are coordinated per digest prefix. V2/legacy
     // OS locks still protect independent handles; v3 uses a lock per leaf shard.
     buckets: [Mutex<VerifiedCache>; 256],
+    #[cfg(test)]
+    size_reads: AtomicU64,
 }
 
 impl BlobStore {
@@ -156,6 +159,8 @@ impl BlobStore {
             track_flat_publications: cleanup && !sharded,
             directories: Mutex::new(HashSet::new()),
             buckets: std::array::from_fn(|_| Mutex::new(VerifiedCache::default())),
+            #[cfg(test)]
+            size_reads: AtomicU64::new(0),
         })
     }
 
@@ -194,6 +199,82 @@ impl BlobStore {
         Ok(FrameDecoder::new(
             fs::File::open(self.path(cid)).with_context(|| format!("blob not found: {cid}"))?,
         ))
+    }
+
+    pub(crate) fn size(&self, cid: &Cid) -> Result<u64> {
+        self.metadata_size(|| fs::metadata(self.path(cid)))
+    }
+
+    /// Visit each referenced directory in its native order. In particular,
+    /// exFAT can reuse its forward lookup hint instead of restarting random
+    /// filename searches in a large flat directory for every manifest chunk.
+    pub(crate) fn referenced_size(
+        &self,
+        cids: HashSet<Cid>,
+        mut on_progress: impl FnMut(u64) -> Result<()>,
+    ) -> Result<u64> {
+        let mut directories: BTreeMap<PathBuf, HashSet<OsString>> = BTreeMap::new();
+        for cid in cids {
+            let path = self.path(&cid);
+            directories
+                .entry(path.parent().unwrap().to_path_buf())
+                .or_default()
+                .insert(path.file_name().unwrap().to_owned());
+        }
+        let mut size = 0u64;
+        let mut processed = 0;
+        on_progress(processed)?;
+        for (directory, mut needed) in directories {
+            for (visited, entry) in fs::read_dir(&directory)
+                .with_context(|| format!("failed to read blob directory {}", directory.display()))?
+                .enumerate()
+            {
+                let entry = entry?;
+                if needed.remove(&entry.file_name()) {
+                    size = size
+                        .checked_add(self.metadata_size(|| {
+                            let metadata = entry.metadata()?;
+                            if metadata.file_type().is_symlink() {
+                                fs::metadata(entry.path())
+                            } else {
+                                Ok(metadata)
+                            }
+                        })?)
+                        .context("archive size overflow")?;
+                    processed += 1;
+                }
+                // Also yield during directories containing mostly unreferenced
+                // historical files, so cancellation does not wait for a match.
+                if visited.is_multiple_of(256) || needed.is_empty() {
+                    on_progress(processed)?;
+                }
+                if needed.is_empty() {
+                    break;
+                }
+            }
+            if let Some(missing) = needed.iter().next() {
+                anyhow::bail!(
+                    "referenced blob not found: {}",
+                    directory.join(missing).display()
+                );
+            }
+        }
+        on_progress(processed)?;
+        Ok(size)
+    }
+
+    fn metadata_size(
+        &self,
+        metadata: impl FnOnce() -> std::io::Result<fs::Metadata>,
+    ) -> Result<u64> {
+        #[cfg(test)]
+        self.size_reads.fetch_add(1, Ordering::Relaxed);
+        Ok(metadata()?.len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_size_reads(&self) -> u64 {
+        self.size_reads.swap(0, Ordering::Relaxed)
     }
 
     // Restores always verify the bytes, even when publication used the cache.

@@ -231,6 +231,7 @@ export interface MigrationProgress {
     workers: number;
     phase: 'preparing' | 'migrating' | 'finalizing' | 'completed';
     active_files: { path: string; stage: 'converting' | 'verifying' | 'saving_checkpoint'; bytes_processed: number; total_bytes: number }[];
+    finalization?: { phase: 'reading_manifests' | 'counting_blobs'; processed: number; total: number } | null;
 }
 
 export function workspaceStorageFormat(workspaceId: string): Promise<number> {

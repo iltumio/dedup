@@ -268,7 +268,7 @@ fn migrate_archive(
         .map_err(|e| e.to_string())?;
     let source = source_workspace(state, workspace_id)?;
     let destination = PathBuf::from(destination.trim());
-    with_source(state, Path::new(&source.store_path), |store| {
+    let mut final_progress = with_source(state, Path::new(&source.store_path), |store| {
         if store.content.format_version() != 1 {
             return Err("This archive already uses FastCDC.".into());
         }
@@ -289,12 +289,16 @@ fn migrate_archive(
             &destination,
             ChunkingProfile::default(),
             MigrationOptions { workers },
-            on_progress,
+            &on_progress,
             || state.migration_cancelled.load(Ordering::Relaxed),
         )
-        .map_err(|e| format!("{e:#}"))?;
-        Ok(())
+        .map_err(|e| format!("{e:#}"))
     })?;
+    final_progress.phase = MigrationPhase::Finalizing;
+    on_progress(&final_progress);
+    if state.migration_cancelled.load(Ordering::Relaxed) {
+        return Err("migration cancelled; use the same destination to resume".into());
+    }
     let destination = destination.canonicalize().map_err(|e| e.to_string())?;
     let migrated = Store::open_existing(&destination).map_err(|e| format!("{e:#}"))?;
     let (
@@ -304,7 +308,20 @@ fn migrate_archive(
         duplicate_files,
         total_original_bytes,
         total_stored_bytes,
-    ) = migrated.compute_stats().map_err(|e| format!("{e:#}"))?;
+    ) = migrated
+        .compute_stats_with_progress(|progress| {
+            anyhow::ensure!(
+                !state.migration_cancelled.load(Ordering::Relaxed),
+                "migration cancelled; use the same destination to resume"
+            );
+            final_progress.finalization = Some(progress);
+            on_progress(&final_progress);
+            Ok(())
+        })
+        .map_err(|e| format!("{e:#}"))?;
+    if state.migration_cancelled.load(Ordering::Relaxed) {
+        return Err("migration cancelled; use the same destination to resume".into());
+    }
     let ws = Workspace {
         id: workspace::generate_id(),
         label: label.trim().into(),
@@ -338,6 +355,10 @@ fn migrate_archive(
     })?;
     config.workspaces.into_iter().find(|ws| Path::new(&ws.store_path).canonicalize().ok().as_ref() == Some(&destination))
         .ok_or_else(|| "Migration finished, but the new archive could not be registered. Open its destination folder.".into())
+        .inspect(|_| {
+            final_progress.phase = MigrationPhase::Completed;
+            on_progress(&final_progress);
+        })
 }
 
 #[cfg(test)]
@@ -411,15 +432,29 @@ mod tests {
             .into_owned();
         let job = MigrationJob::start(&state, "job-1").unwrap();
         assert!(OperationGuard::acquire(&state).is_err());
+        let progress = std::sync::Mutex::new(Vec::new());
         let ws = migrate_archive(
             &state,
             "original",
             &destination,
             "Photos (FastCDC)",
             4,
-            |_| {},
+            |p| progress.lock().unwrap().push(p.clone()),
         )
         .unwrap();
+        let progress = progress.into_inner().unwrap();
+        assert!(progress
+            .iter()
+            .any(|p| p.finalization.is_some_and(|s| s.phase
+                == dedup_core::StorageStatsPhase::ReadingManifests
+                && s.processed == s.total
+                && s.total == 2)));
+        assert!(progress.iter().any(|p| p
+            .finalization
+            .is_some_and(|s| s.phase == dedup_core::StorageStatsPhase::CountingBlobs
+                && s.processed == s.total
+                && s.total == 2)));
+        assert_eq!(progress.last().unwrap().phase, MigrationPhase::Completed);
         drop(job);
         assert!(!state.operation_running.load(Ordering::Relaxed));
         assert!(state.migration_job.lock().unwrap().is_none());
@@ -443,6 +478,41 @@ mod tests {
                 .unwrap(),
             b"first payload"
         );
+    }
+
+    #[test]
+    fn cancellation_during_final_totals_keeps_the_verified_destination_resumable() {
+        let root = TempDir::new().unwrap();
+        let state = setup(root.path());
+        let destination = root.path().join("fastcdc");
+        let destination_text = destination.to_string_lossy();
+        let error = migrate_archive(&state, "original", &destination_text, "Migrated", 2, |p| {
+            if p.finalization
+                .is_some_and(|s| s.phase == dedup_core::StorageStatsPhase::CountingBlobs)
+            {
+                state.migration_cancelled.store(true, Ordering::Relaxed);
+            }
+        })
+        .unwrap_err();
+        assert!(error.contains("migration cancelled"));
+        {
+            let config = state.workspaces.lock().unwrap();
+            assert_eq!(config.workspaces.len(), 1);
+            assert_eq!(config.pending_migrations.len(), 1);
+        }
+        let completed = Store::open_existing(&destination).unwrap();
+        assert_eq!(completed.read_file("/a").unwrap(), b"first payload");
+        drop(completed);
+        state.migration_cancelled.store(false, Ordering::Relaxed);
+        let resumed =
+            migrate_archive(&state, "original", &destination_text, "Migrated", 2, |_| {}).unwrap();
+        assert_eq!(resumed.stats.total_files, 3);
+        assert!(state
+            .workspaces
+            .lock()
+            .unwrap()
+            .pending_migrations
+            .is_empty());
     }
 
     #[test]

@@ -120,6 +120,12 @@ including checkpoints created by the serial migrator. Concurrent disk reads and
 writes may limit the benefit on slower drives. The displayed processing rate
 counts uncompressed reads and verification, rather than physical disk writes.
 
+Final archive totals collect referenced chunks once and read their sizes in native
+directory order, including mixed flat/sharded archives. Shared chunks contribute
+once; unreferenced historical blobs are excluded. The desktop app reports separate
+manifest-reading and chunk-counting progress during this stage, which can be stopped
+and resumed without discarding converted content.
+
 After completion, use `--store .store-v2` or import that directory into the desktop
 app. Releases that only support v1/v2 cannot open the v3 layout; use the original
 archive to return to an older release. Resuming an old v2 migration destination

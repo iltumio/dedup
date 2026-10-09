@@ -19,6 +19,20 @@ const CHUNK_BATCH_BYTES: usize = 2 * 1024 * 1024;
 const CONFIG: TableDefinition<&str, &[u8]> = TableDefinition::new("config");
 const MANIFESTS: TableDefinition<&str, &[u8]> = TableDefinition::new("manifests");
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageStatsPhase {
+    ReadingManifests,
+    CountingBlobs,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct StorageStatsProgress {
+    pub phase: StorageStatsPhase,
+    pub processed: u64,
+    pub total: u64,
+}
+
 /// Persisted FastCDC profile. Variant, gear tables, normalization and seed are
 /// fixed by profile version 1 (fastcdc 5.0.0, v2020, Level1, seed 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,29 +528,59 @@ impl ContentStore {
             );
             for chunk in manifest.chunks {
                 let cid = cid_util::cid_from_bytes(&chunk.cid)?;
-                entries.insert(
-                    format!("blob:{cid}"),
-                    fs::metadata(self.blob_path(&cid))?.len(),
-                );
+                entries.insert(format!("blob:{cid}"), self.blobs.size(&cid)?);
             }
         } else {
-            entries.insert(
-                format!("blob:{cid}"),
-                fs::metadata(self.blob_path(cid))?.len(),
-            );
+            entries.insert(format!("blob:{cid}"), self.blobs.size(cid)?);
         }
         Ok(entries)
     }
 
-    pub(crate) fn referenced_size(&self, cids: impl IntoIterator<Item = Cid>) -> Result<u64> {
-        let mut seen_files = HashSet::new();
-        let mut entries = BTreeMap::new();
-        for cid in cids {
-            if seen_files.insert(cid) {
-                entries.extend(self.storage_entries(&cid)?);
+    pub(crate) fn referenced_size_with_progress(
+        &self,
+        cids: impl IntoIterator<Item = Cid>,
+        mut on_progress: impl FnMut(StorageStatsProgress) -> Result<()>,
+    ) -> Result<u64> {
+        let files = cids.into_iter().collect::<HashSet<_>>();
+        let total = files.len() as u64;
+        let mut blobs = HashSet::new();
+        let mut manifest_bytes = 0u64;
+        on_progress(StorageStatsProgress {
+            phase: StorageStatsPhase::ReadingManifests,
+            processed: 0,
+            total,
+        })?;
+        for (index, cid) in files.into_iter().enumerate() {
+            if let Some(manifest) = self.manifest(&cid)? {
+                manifest_bytes = manifest_bytes
+                    .checked_add(bincode::serialized_size(&manifest)?)
+                    .context("archive size overflow")?;
+                for chunk in manifest.chunks {
+                    blobs.insert(cid_util::cid_from_bytes(&chunk.cid)?);
+                }
+            } else {
+                blobs.insert(cid);
+            }
+            let processed = index as u64 + 1;
+            if processed.is_multiple_of(256) || processed == total {
+                on_progress(StorageStatsProgress {
+                    phase: StorageStatsPhase::ReadingManifests,
+                    processed,
+                    total,
+                })?;
             }
         }
-        Ok(entries.values().sum())
+        let total = blobs.len() as u64;
+        let payload = self.blobs.referenced_size(blobs, |processed| {
+            on_progress(StorageStatsProgress {
+                phase: StorageStatsPhase::CountingBlobs,
+                processed,
+                total,
+            })
+        })?;
+        manifest_bytes
+            .checked_add(payload)
+            .context("archive size overflow")
     }
 }
 
@@ -598,6 +642,127 @@ mod tests {
                 seed as u8
             })
             .collect()
+    }
+
+    #[test]
+    fn archive_totals_read_each_shared_blob_size_once() {
+        let root = TempDir::new().unwrap();
+        let store = ContentStore::open(root.path()).unwrap();
+        let first = vec![0; 4 * 1024 * 1024];
+        let mut second = first.clone();
+        second.push(1);
+        let cids = [compute_cid(&first), compute_cid(&second)];
+        store.store(&cids[0], &first).unwrap();
+        store.store(&cids[1], &second).unwrap();
+        // Historical content must not contribute to referenced totals.
+        let orphan = b"unreferenced payload";
+        store.store(&compute_cid(orphan), orphan).unwrap();
+        let mut expected = BTreeMap::new();
+        for cid in &cids {
+            expected.extend(store.storage_entries(cid).unwrap());
+        }
+        let blob_count = expected
+            .keys()
+            .filter(|key| key.starts_with("blob:"))
+            .count();
+        store.blobs.take_size_reads();
+        assert_eq!(
+            store
+                .referenced_size_with_progress([cids[0], cids[1], cids[0]], |_| Ok(()))
+                .unwrap(),
+            expected.values().sum::<u64>()
+        );
+        assert_eq!(store.blobs.take_size_reads(), blob_count as u64);
+    }
+
+    #[test]
+    fn archive_totals_preserve_mixed_layout_accounting_and_report_missing_blobs() {
+        let root = TempDir::new().unwrap();
+        let first = payload(1024 * 1024);
+        let first_cid = make_flat_v2(root.path(), &first);
+        let mut store = ContentStore::open(root.path()).unwrap();
+        store.enable_sharded_writes().unwrap();
+        let mut second = first.clone();
+        second.splice(16384..16384, b"shifted bytes".iter().copied());
+        let second_cid = compute_cid(&second);
+        let empty_cid = compute_cid(b"");
+        store.store(&second_cid, &second).unwrap();
+        store.store(&empty_cid, b"").unwrap();
+        let cids = [first_cid, second_cid, empty_cid, first_cid];
+        let mut expected = BTreeMap::new();
+        for cid in cids {
+            expected.extend(store.storage_entries(&cid).unwrap());
+        }
+        let mut events = Vec::new();
+        let size = store
+            .referenced_size_with_progress(cids, |progress| {
+                events.push(progress);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(size, expected.values().sum::<u64>());
+        for phase in [
+            StorageStatsPhase::ReadingManifests,
+            StorageStatsPhase::CountingBlobs,
+        ] {
+            let phase_events = events
+                .iter()
+                .filter(|p| p.phase == phase)
+                .collect::<Vec<_>>();
+            assert_eq!(phase_events.first().unwrap().processed, 0);
+            let last = phase_events.last().unwrap();
+            assert_eq!(last.processed, last.total);
+            assert!(phase_events
+                .windows(2)
+                .all(|pair| pair[0].processed <= pair[1].processed));
+        }
+        assert_eq!(events[0].total, 3); // Duplicate file CIDs never reread manifests.
+        let missing =
+            cid_util::cid_from_bytes(&store.manifest(&first_cid).unwrap().unwrap().chunks[0].cid)
+                .unwrap();
+        fs::remove_file(store.blob_path(&missing)).unwrap();
+        assert!(store
+            .referenced_size_with_progress(cids, |_| Ok(()))
+            .unwrap_err()
+            .to_string()
+            .contains("referenced blob not found"));
+    }
+
+    #[test]
+    fn archive_totals_cancellation_prevents_size_reads_and_leaves_content_readable() {
+        let root = TempDir::new().unwrap();
+        let store = ContentStore::open(root.path()).unwrap();
+        let bytes = payload(1024 * 1024);
+        let cid = compute_cid(&bytes);
+        store.store(&cid, &bytes).unwrap();
+        for phase in [
+            StorageStatsPhase::ReadingManifests,
+            StorageStatsPhase::CountingBlobs,
+        ] {
+            store.blobs.take_size_reads();
+            let result = store.referenced_size_with_progress([cid], |progress| {
+                if progress.phase == phase {
+                    anyhow::bail!("cancelled test");
+                }
+                Ok(())
+            });
+            assert_eq!(result.unwrap_err().to_string(), "cancelled test");
+            assert_eq!(store.blobs.take_size_reads(), 0);
+            assert_eq!(store.read(&cid).unwrap(), bytes);
+        }
+        let mut empty_events = Vec::new();
+        assert_eq!(
+            store
+                .referenced_size_with_progress([], |p| {
+                    empty_events.push(p);
+                    Ok(())
+                })
+                .unwrap(),
+            0
+        );
+        assert!(empty_events
+            .iter()
+            .all(|p| p.total == 0 && p.processed == 0));
     }
 
     fn make_flat_v2(root: &Path, bytes: &[u8]) -> Cid {
@@ -669,7 +834,16 @@ mod tests {
         let data = b"small flat FastCDC archive";
         let cid = make_flat_v2(root.path(), data);
         let mut store = ContentStore::open(root.path()).unwrap();
+        let flat_size = store
+            .referenced_size_with_progress([cid], |_| Ok(()))
+            .unwrap();
         assert_eq!(store.upgrade_blob_layout().unwrap(), 1);
+        assert_eq!(
+            store
+                .referenced_size_with_progress([cid], |_| Ok(()))
+                .unwrap(),
+            flat_size
+        );
         assert_eq!(store.read(&cid).unwrap(), data);
         drop(store);
         let reopened = ContentStore::open(root.path()).unwrap();

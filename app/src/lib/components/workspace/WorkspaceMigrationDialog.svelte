@@ -25,6 +25,7 @@
   const dataIdle = $derived((activity?.progress?.idle_seconds ?? 0) + updateAge);
   const preparing = $derived(!activity?.progress || activity.progress.phase === "preparing");
   const finalizing = $derived(activity?.progress?.phase === "finalizing" || activity?.progress?.phase === "completed");
+  const totals = $derived(activity?.progress?.finalization);
   const elapsed = $derived(activity?.startedAt ? Math.max(0, ((app.migrating ? now : activity.finishedAt ?? now) - activity.startedAt) / 1000) : 0);
   const rate = $derived(updateAge > 2 ? 0 : activity?.progress?.rate_bytes_per_second ?? 0);
   const workerSlots = $derived(Array.from({ length: Math.min(32, Math.max(1, activity?.workers || 1)) }, (_, index) => index));
@@ -82,7 +83,9 @@
             <div class="notice grid gap-1" role="status">
               <p class="flex items-center gap-2 text-sm">
                 <span class="loading loading-spinner loading-xs motion-reduce:animate-none" aria-hidden="true"></span>
-                {preparing ? "Preparing archive…" : finalizing ? "Calculating totals and adding the archive…" : `${activity.progress!.active_files.length} of ${activity.progress!.workers} parallel files active`}
+                {preparing ? "Preparing archive…" : finalizing ? totals?.phase === "reading_manifests" ? "Reading archive index…"
+                  : totals?.phase === "counting_blobs" ? "Calculating stored size…" : "Calculating totals and adding the archive…"
+                  : `${activity.progress!.active_files.length} of ${activity.progress!.workers} parallel files active`}
               </p>
               <p class="text-xs muted">{updateAge >= 5 ? `Waiting for an update · last update ${Math.floor(updateAge)}s ago` : "Updates arriving · last update just now"}</p>
               <div class="min-h-4">
@@ -100,7 +103,14 @@
           </dl>
           <p class="text-xs muted">Processing includes uncompressed reads and verification, not disk write speed.</p>
           <div class="min-h-18">
-            {#if activity.progress && activity.progress.phase !== "preparing"}
+            {#if app.migrating && finalizing && totals}
+              <div class="grid gap-2" aria-live="polite" aria-atomic="true">
+                <progress class="progress progress-primary w-full" aria-label="Archive totals progress"
+                  value={totals.processed} max={Math.max(totals.total, 1)}></progress>
+                <p class="text-sm">{totals.processed.toLocaleString()} of {totals.total.toLocaleString()} {totals.phase === "reading_manifests" ? "unique files counted" : "chunks counted"}</p>
+                <p class="text-xs muted">Converted files are already verified.</p>
+              </div>
+            {:else if activity.progress && activity.progress.phase !== "preparing"}
               <div class="grid gap-2" aria-live="polite" aria-atomic="true">
                 <progress class="progress progress-primary w-full" aria-label="Migration progress"
                   value={activity.progress.unique_files} max={Math.max(activity.progress.total_unique_files, 1)}></progress>

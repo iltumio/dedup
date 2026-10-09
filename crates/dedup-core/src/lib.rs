@@ -14,8 +14,7 @@ pub mod migration;
 pub mod scanner;
 pub mod types;
 
-pub use content_store::ChunkingProfile;
-pub use content_store::ContentStore;
+pub use content_store::{ChunkingProfile, ContentStore, StorageStatsPhase, StorageStatsProgress};
 pub use metadata::MetadataDb;
 pub use types::{
     BuiltinScanPreset, DirEntry, DirMetadata, ExtensionStats, FileMetadata, ScanOptions,
@@ -313,6 +312,15 @@ impl Store {
     /// Stored bytes count referenced payloads and manifests once, excluding
     /// database allocation overhead and unreferenced historical content.
     pub fn compute_stats(&self) -> Result<(u64, u64, u64, u64, u64, u64)> {
+        self.compute_stats_with_progress(|_| Ok(()))
+    }
+
+    /// Count referenced chunks once, reporting manifest and filesystem progress.
+    /// Return an error from the callback to cancel the read-only calculation.
+    pub fn compute_stats_with_progress(
+        &self,
+        on_progress: impl FnMut(StorageStatsProgress) -> Result<()>,
+    ) -> Result<(u64, u64, u64, u64, u64, u64)> {
         let (files, dirs, unique, duplicates, original, _) = self.metadata.compute_stats()?;
         let cids = self
             .metadata
@@ -321,7 +329,9 @@ impl Store {
             .into_iter()
             .map(|(_, meta)| cid::cid_from_bytes(&meta.cid))
             .collect::<Result<Vec<_>>>()?;
-        let stored = self.content.referenced_size(cids)?;
+        let stored = self
+            .content
+            .referenced_size_with_progress(cids, on_progress)?;
         Ok((files, dirs, unique, duplicates, original, stored))
     }
 }
