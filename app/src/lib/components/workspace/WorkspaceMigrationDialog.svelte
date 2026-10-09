@@ -27,6 +27,7 @@
   const finalizing = $derived(activity?.progress?.phase === "finalizing" || activity?.progress?.phase === "completed");
   const elapsed = $derived(activity?.startedAt ? Math.max(0, ((app.migrating ? now : activity.finishedAt ?? now) - activity.startedAt) / 1000) : 0);
   const rate = $derived(updateAge > 2 ? 0 : activity?.progress?.rate_bytes_per_second ?? 0);
+  const workerSlots = $derived(Array.from({ length: Math.min(32, Math.max(1, activity?.workers || 1)) }, (_, index) => index));
   function duration(seconds: number) {
     const whole = Math.floor(seconds);
     return `${Math.floor(whole / 3600).toString().padStart(2, "0")}:${Math.floor((whole % 3600) / 60).toString().padStart(2, "0")}:${(whole % 60).toString().padStart(2, "0")}`;
@@ -43,7 +44,7 @@
   }
 </script>
 
-<UiDialog {open} {title} closeDisabled={app.migrating || app.checkingMigration || browsing} {onClose}>
+<UiDialog {open} {title} size="extra-wide" closeDisabled={app.migrating || app.checkingMigration || browsing} {onClose}>
   {#if activity}
     <div class="flex flex-col gap-4">
       <p class="text-sm">{activity.workspace.label}</p>
@@ -84,9 +85,11 @@
                 {preparing ? "Preparing archive…" : finalizing ? "Calculating totals and adding the archive…" : `${activity.progress!.active_files.length} of ${activity.progress!.workers} parallel files active`}
               </p>
               <p class="text-xs muted">{updateAge >= 5 ? `Waiting for an update · last update ${Math.floor(updateAge)}s ago` : "Updates arriving · last update just now"}</p>
-              {#if !preparing && !finalizing && dataIdle >= 15}
-                <p class="text-xs">No data progress for {Math.floor(dataIdle)}s. The disk may be busy.</p>
-              {/if}
+              <div class="min-h-4">
+                {#if !preparing && !finalizing && dataIdle >= 15}
+                  <p class="text-xs">No data progress for {Math.floor(dataIdle)}s. The disk may be busy.</p>
+                {/if}
+              </div>
             </div>
             <p class="font-path text-xs muted break-all">{activity.destination}</p>
           {/if}
@@ -96,26 +99,35 @@
             <div><dt class="muted">Data processed this run</dt><dd class="tabular-nums text-sm">{formatSize(activity.progress?.work_bytes ?? 0)}</dd></div>
           </dl>
           <p class="text-xs muted">Processing includes uncompressed reads and verification, not disk write speed.</p>
-          {#if activity.progress && activity.progress.phase !== "preparing"}
-            <div class="grid gap-2" aria-live="polite" aria-atomic="true">
-              <progress class="progress progress-primary w-full" aria-label="Migration progress"
-                value={activity.progress.unique_files} max={Math.max(activity.progress.total_unique_files, 1)}></progress>
-              <p class="text-sm">{activity.progress.unique_files.toLocaleString()} of {activity.progress.total_unique_files.toLocaleString()} unique files verified</p>
-              <p class="text-xs muted">{formatSize(activity.progress.bytes_processed)} of {formatSize(activity.progress.total_bytes)} verified · {activity.progress.resumed_files.toLocaleString()} reused from checkpoints</p>
-            </div>
-            {#if app.migrating && activity.progress.active_files.length > 0}
-              <ul class="grid gap-3" aria-label="Files in progress">
-                {#each activity.progress.active_files as file (file.path)}
-                  <li class="min-w-0 grid gap-1">
-                    <p class="font-path truncate text-xs" title={file.path}>{file.path}</p>
-                    <div class="flex justify-between gap-2 text-xs muted"><span>{stageLabel[file.stage]}</span><span class="tabular-nums">{formatSize(file.bytes_processed)} / {formatSize(file.total_bytes)}</span></div>
+          <div class="min-h-18">
+            {#if activity.progress && activity.progress.phase !== "preparing"}
+              <div class="grid gap-2" aria-live="polite" aria-atomic="true">
+                <progress class="progress progress-primary w-full" aria-label="Migration progress"
+                  value={activity.progress.unique_files} max={Math.max(activity.progress.total_unique_files, 1)}></progress>
+                <p class="text-sm">{activity.progress.unique_files.toLocaleString()} of {activity.progress.total_unique_files.toLocaleString()} unique files verified</p>
+                <p class="text-xs muted">{formatSize(activity.progress.bytes_processed)} of {formatSize(activity.progress.total_bytes)} verified · {activity.progress.resumed_files.toLocaleString()} reused from checkpoints</p>
+              </div>
+            {:else}<progress class="progress progress-primary w-full" aria-label="Migration progress"></progress>{/if}
+          </div>
+          {#if app.migrating}
+            <!-- Keep every configured worker's space, including while preparing or finalizing. -->
+            <ul class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3" aria-label="Files in progress">
+              {#each workerSlots as index (index)}
+                {@const file = activity.progress?.active_files[index]}
+                <li class="h-14 min-w-0 grid content-start gap-1" aria-hidden={!file}>
+                  {#if file}
+                    <p class="font-path truncate text-xs leading-4" title={file.path}>{file.path}</p>
+                    <div class="flex justify-between gap-2 text-xs leading-4 muted">
+                      <span class="min-w-0 truncate">{stageLabel[file.stage]}</span>
+                      <span class="shrink-0 tabular-nums">{formatSize(file.bytes_processed)} / {formatSize(file.total_bytes)}</span>
+                    </div>
                     <progress class="progress w-full" aria-label={`${stageLabel[file.stage]} ${file.path}`}
                       value={file.bytes_processed} max={Math.max(file.total_bytes, 1)}></progress>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-          {:else}<progress class="progress progress-primary w-full" aria-label="Migration progress"></progress>{/if}
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
         </div>
       {/if}
       {#if activity.error}<p class="alert alert-error text-sm break-words" role="alert">{activity.error}</p>{/if}

@@ -7,6 +7,7 @@
     title: string;
     description?: string;
     wide?: boolean;
+    size?: "default" | "wide" | "extra-wide";
     closeDisabled?: boolean;
     onClose: () => void;
     children?: Snippet;
@@ -18,11 +19,15 @@
     title,
     description,
     wide = false,
+    size,
     closeDisabled = false,
     onClose,
     children,
     actions,
   }: Props = $props();
+
+  const widthClass = $derived(size === "extra-wide" ? "max-w-6xl"
+    : size === "wide" || (!size && wide) ? "max-w-4xl" : "max-w-2xl");
 
   let dialog: HTMLDialogElement;
   let previousActiveElement: HTMLElement | null = null;
@@ -73,7 +78,7 @@
   onclose={restoreFocus}
 >
   <div
-    class={`modal-box flex max-h-[calc(100vh-1.5rem)] w-[calc(100vw-1.5rem)] flex-col overflow-hidden border border-base-300 bg-base-200 p-0 shadow-xl ${wide ? "max-w-4xl" : "max-w-2xl"}`}
+    class={`modal-box flex max-h-[calc(100vh-1.5rem)] w-[calc(100vw-1.5rem)] flex-col overflow-hidden border border-base-300 bg-base-200 p-0 shadow-xl ${widthClass}`}
   >
     <header
       class="flex items-start justify-between gap-4 border-b border-base-300 px-4 py-3"
