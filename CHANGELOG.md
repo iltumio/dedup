@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org), and the changelog is maint
 automatically by [Knope](https://knope.tech) from
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## 0.3.2 (2026-10-09)
+
+### Fixes
+
+#### Improve archive migration finalization
+
+Count each referenced chunk once and scan blob directories in filesystem order
+to speed up final storage totals. Show actual finalization progress and allow
+cancellation and resumption without losing verified files.
+
 ## 0.3.1 (2026-10-09)
 
 ### Fixes
