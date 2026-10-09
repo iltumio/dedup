@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org), and the changelog is maint
 automatically by [Knope](https://knope.tech) from
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## 0.3.1 (2026-10-09)
+
+### Fixes
+
+- keep migration dialog size stable across active files
+
 ## 0.3.0 (2026-10-09)
 
 ### Breaking Changes
