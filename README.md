@@ -1,8 +1,23 @@
-# dedup
+<p align="center">
+  <img src="app/src-tauri/icons/icon.svg" alt="dedup logo" width="112" height="112">
+</p>
 
-Content-addressed file deduplication tool with a desktop visualizer.
+<h1 align="center">dedup</h1>
 
-`dedup` scans directories, identifies files with BLAKE3, splits their content with FastCDC, and compresses shared chunks with LZ4. Exact copies and unchanged parts of similar files are stored only once. Existing whole-file archives remain readable and writable until explicitly migrated. A Tauri + Svelte 5 desktop app lets you browse the virtual filesystem and inspect duplicates.
+<p align="center">
+  Content-addressed file archiving with FastCDC deduplication, LZ4 compression, a Rust CLI, and a desktop app.
+</p>
+
+<p align="center">
+  <a href="https://github.com/iltumio/dedup/releases/latest"><img src="https://img.shields.io/github/v/release/iltumio/dedup?label=version" alt="Latest release"></a>
+  <a href="https://github.com/iltumio/dedup/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/iltumio/dedup/release.yml?label=build" alt="Release build status"></a>
+</p>
+
+`dedup` archives files while storing identical content only once. FastCDC shares
+unchanged parts of similar files, BLAKE3 identifies and verifies content, and LZ4
+compresses the stored data. Use the CLI or the Tauri + Svelte desktop app to add
+files, browse the archive, inspect duplicates, and extract content. Original
+whole-file archives remain supported, with resumable migration to FastCDC.
 
 ## Install
 
