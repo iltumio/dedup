@@ -46,7 +46,7 @@ just build-app   # Desktop app (also needs Node.js 22+)
 dedup scan --source ~/photos
 ```
 
-This creates a `.store/` directory containing compressed chunks, a manifest database, and filesystem metadata. New stores use format v2 with FastCDC; opening an existing legacy store preserves its whole-file format.
+This creates a `.store/` directory containing compressed chunks, a manifest database, and filesystem metadata. New stores use format v3 with FastCDC and digest-based blob subdirectories; existing v1 whole-file and v2 flat FastCDC archives remain supported.
 
 In the desktop app, **Create an archive** includes an **Archive format** choice:
 **FastCDC** (default) shares identical files and chunks of similar files;
@@ -106,16 +106,39 @@ Both archives coexist, so allow space for the new archive during conversion.
 Checkpoint and chunk publication use durable temporary files, file locks and
 atomic renames; hard links are not required, including on exFAT volumes.
 
-Parallelism is across distinct files; a single remaining file uses one worker.
+File workers handle reading, chunking and disk publication. Chunk BLAKE3 hashing
+and LZ4 compression run on a shared Rayon CPU pool, including for a single large
+file. The CPU pool defaults to up to four available CPUs; buffers are batched at
+2 MiB per file (or one maximum-size chunk for larger custom profiles), with
+additional compression and FastCDC buffers. On Linux 5.8 or newer, a filesystem durability
+barrier synchronizes chunk data and directory metadata before the file manifest
+commits, avoiding a separate disk flush per chunk. This also flushes other pending
+writes on that filesystem. Other kernels and platforms retain per-blob data synchronization
+and synchronize the touched directory hierarchy before committing the manifest.
 `--workers` accepts 1–32 and can change when resuming an existing checkpoint,
 including checkpoints created by the serial migrator. Concurrent disk reads and
 writes may limit the benefit on slower drives. The displayed processing rate
 counts uncompressed reads and verification, rather than physical disk writes.
 
 After completion, use `--store .store-v2` or import that directory into the desktop
-app. Older releases cannot read the v2 manifest format; use the original store if
-you need to return to an older release. No automatic deletion or in-place upgrade
-is performed.
+app. Releases that only support v1/v2 cannot open the v3 layout; use the original
+archive to return to an older release. Resuming an old v2 migration destination
+enables v3 writes immediately: existing flat chunks remain readable and new
+chunks go into subdirectories. Original source archives remain unchanged.
+
+To reorganize an existing FastCDC archive completely, close it in the app and run:
+
+```sh
+dedup optimize --store /path/to/fastcdc-archive
+```
+
+This upgrades the destination in place, preserving content CIDs, chunk boundaries,
+manifests and filesystem metadata. Run it again after interruption to resume.
+Each flat blob is copied and synchronized before its old name is removed; allow
+space for the largest compressed blob. Mixed flat/sharded layouts remain readable.
+The layout uses `blobs/ab/c/<CID>.lz4`, with `ab/c` derived from the first 12 digest
+bits, distributing content across up to 4,096 leaf directories. Legacy whole-file
+archives must be migrated to FastCDC before optimization.
 
 The default persisted profile is FastCDC v2020, normalization level 1, seed 0,
 with minimum/target/maximum sizes of 16/64/256 KiB. Migration also accepts
@@ -157,7 +180,7 @@ Source directory
   │  walkdir + BLAKE3 hashing + FastCDC
   ▼
 Content Store (.store/)
-  ├── blobs/          LZ4-compressed chunks, named by CIDv1
+  ├── blobs/ab/c/     LZ4-compressed chunks, named by CIDv1 (v3)
   ├── content.redb    Format/profile + file CID → ordered chunk manifest
   └── metadata.redb   Virtual paths, dates, permissions, duplicate index
 ```
@@ -180,13 +203,17 @@ Scan stored-byte totals describe newly published payloads during that scan.
 ```sh
 cargo run -p dedup-core --release --example fastcdc_benchmark
 cargo run -p dedup-core --release --example fastcdc_benchmark -- /path/to/data
+DEDUP_BENCH_THREADS=8 DEDUP_BENCH_PROFILE=64K DEDUP_BENCH_FS_ROOT=/path/to/disk \
+  cargo run -p dedup-core --release --example fastcdc_benchmark
 ```
 
 The first command uses deterministic synthetic file versions; the second reads the
 specified directory into memory. Both compare whole-file storage with FastCDC
 64 KiB and 256 KiB profiles, measuring write/verified-read throughput, compressed
 blob bytes, actual manifest database size, and blob count. Temporary benchmark
-stores are removed automatically. Measure representative data before choosing a
+stores are removed automatically. `DEDUP_BENCH_THREADS` selects CPU concurrency,
+`DEDUP_BENCH_PROFILE` filters profile names, and `DEDUP_BENCH_FS_ROOT` places
+temporary stores on the filesystem being measured. Measure representative data before choosing a
 custom profile; smaller chunks can improve sharing while increasing I/O and
 metadata costs. Normal scanning currently reads each file into memory; migration
 and `ContentStore::copy_to` stream content with bounded chunk buffers.

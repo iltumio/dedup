@@ -68,11 +68,34 @@ fn legacy_archive(root: &Path, source: &Path) {
 }
 
 fn blobs(root: &Path) -> Vec<std::path::PathBuf> {
-    fs::read_dir(root.join("blobs"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
+    walkdir::WalkDir::new(root.join("blobs"))
+        .follow_links(false)
+        .into_iter()
+        .map(|e| e.unwrap().into_path())
         .filter(|p| p.extension().is_some_and(|e| e == "lz4"))
         .collect()
+}
+
+#[test]
+fn fastcdc_blobs_use_digest_shards() {
+    let root = TempDir::new().unwrap();
+    let store = ContentStore::open(root.path()).unwrap();
+    let data = payload(4 * 1024 * 1024);
+    let cid = cid::compute_cid(&data);
+    store.store(&cid, &data).unwrap();
+    let chunks = blobs(root.path());
+    assert!(chunks.len() > 8);
+    for path in chunks {
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        let chunk = cid::cid_from_string(name).unwrap();
+        let digest = chunk.hash().digest();
+        let shard = format!("{:02x}/{:x}", digest[0], digest[1] >> 4);
+        assert_eq!(
+            path.parent().unwrap(),
+            root.path().join("blobs").join(shard)
+        );
+    }
+    assert_eq!(store.read(&cid).unwrap(), data);
 }
 
 #[test]
@@ -222,10 +245,95 @@ fn migration_can_stop_inside_a_large_file_and_resume() {
 }
 
 #[test]
+fn migration_resumes_flat_v2_chunks_without_relocating_the_entire_archive() {
+    #[derive(serde::Serialize)]
+    struct OldFormat {
+        version: u32,
+        profile: ChunkingProfile,
+    }
+    let input = TempDir::new().unwrap();
+    let source = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+    let data = payload(4 * 1024 * 1024);
+    fs::write(input.path().join("large"), &data).unwrap();
+    legacy_archive(source.path(), input.path());
+    let checks = SyncCell::new(0);
+    assert!(migrate_serial(
+        source.path(),
+        target.path(),
+        ChunkingProfile::default(),
+        |_| {},
+        || {
+            checks.set(checks.get() + 1);
+            checks.get() >= 5
+        }
+    )
+    .is_err());
+    // Reproduce the layout/checkpoint written by a pre-optimization release.
+    let previous = blobs(target.path());
+    assert!(!previous.is_empty());
+    for path in &previous {
+        fs::rename(
+            path,
+            target.path().join("blobs").join(path.file_name().unwrap()),
+        )
+        .unwrap();
+    }
+    let db = redb::Database::open(target.path().join("content.redb")).unwrap();
+    let txn = db.begin_write().unwrap();
+    let definition: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("config");
+    let encoded = bincode::serialize(&OldFormat {
+        version: 2,
+        profile: ChunkingProfile::default(),
+    })
+    .unwrap();
+    txn.open_table(definition)
+        .unwrap()
+        .insert("format", encoded.as_slice())
+        .unwrap();
+    txn.commit().unwrap();
+    drop(db);
+    let result = migrate_serial(
+        source.path(),
+        target.path(),
+        ChunkingProfile::default(),
+        |_| {},
+        || false,
+    )
+    .unwrap();
+    assert_eq!(result.unique_files, 1);
+    let flat_count = fs::read_dir(target.path().join("blobs"))
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|e| e == "lz4")
+        })
+        .count();
+    assert_eq!(flat_count, previous.len());
+    let migrated = Store::open_existing(target.path()).unwrap();
+    assert_eq!(migrated.content.format_version(), 3);
+    assert_eq!(migrated.read_file("/backup/large").unwrap(), data);
+    assert_eq!(
+        blobs(target.path()).len(),
+        fastcdc::v2020::FastCDC::with_level(
+            &data,
+            16384,
+            65536,
+            262144,
+            fastcdc::v2020::Normalization::Level1
+        )
+        .count()
+    );
+}
+
+#[test]
 fn shifted_files_share_chunks_and_keep_whole_file_cids() {
     let root = TempDir::new().unwrap();
     let store = ContentStore::open(root.path()).unwrap();
-    assert_eq!(store.format_version(), 2);
+    assert_eq!(store.format_version(), 3);
     let original = payload(4 * 1024 * 1024);
     let mut shifted = original.clone();
     shifted.splice(8192..8192, b"inserted bytes".iter().copied());
@@ -794,7 +902,21 @@ fn heartbeat_reports_waiting_on_disk_before_a_file_completes() {
     let input = TempDir::new().unwrap();
     let legacy = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();
-    fs::write(input.path().join("large"), payload(1024 * 1024)).unwrap();
+    let data = payload(1024 * 1024);
+    let first_chunk = fastcdc::v2020::FastCDC::with_level(
+        &data,
+        16384,
+        65536,
+        262144,
+        fastcdc::v2020::Normalization::Level1,
+    )
+    .next()
+    .unwrap();
+    let first_cid =
+        cid::compute_cid(&data[first_chunk.offset..first_chunk.offset + first_chunk.length]);
+    let digest = first_cid.hash().digest();
+    let shard = format!("blobs/{:02x}/{:x}", digest[0], digest[1] >> 4);
+    fs::write(input.path().join("large"), &data).unwrap();
     legacy_archive(legacy.path(), input.path());
     let held_lock = Arc::new(Mutex::new(None));
     let acquire = AtomicBool::new(true);
@@ -810,12 +932,13 @@ fn heartbeat_reports_waiting_on_disk_before_a_file_completes() {
             migration::MigrationOptions { workers: 1 },
             |p| {
                 if p.work_bytes > 0 && acquire.swap(false, Ordering::Relaxed) {
+                    fs::create_dir_all(destination.join(&shard)).unwrap();
                     let file = fs::OpenOptions::new()
                         .read(true)
                         .write(true)
                         .create(true)
                         .truncate(false)
-                        .open(destination.join("blobs/.publish.lock"))
+                        .open(destination.join(&shard).join(".publish.lock"))
                         .unwrap();
                     file.lock().unwrap();
                     *held_by_worker.lock().unwrap() = Some(file);
@@ -847,7 +970,7 @@ fn heartbeat_reports_waiting_on_disk_before_a_file_completes() {
 #[test]
 fn explicit_format_survives_reopening_before_and_after_scans() {
     use dedup_core::StorageFormat;
-    for (format, version) in [(StorageFormat::Legacy, 1), (StorageFormat::Fastcdc, 2)] {
+    for (format, version) in [(StorageFormat::Legacy, 1), (StorageFormat::Fastcdc, 3)] {
         let tmp = TempDir::new().unwrap();
         let archive = tmp.path().join("archive");
         let input = tmp.path().join("input");
@@ -869,7 +992,7 @@ fn explicit_format_survives_reopening_before_and_after_scans() {
         fs::write(input.join("new"), b"another file").unwrap();
         store.scan_into(&input, "/", |_| {}).unwrap();
         assert_eq!(store.read_file("/new").unwrap(), b"another file");
-        assert_eq!(archive.join("content.redb").exists(), version == 2);
+        assert_eq!(archive.join("content.redb").exists(), version >= 2);
     }
 }
 
@@ -905,7 +1028,7 @@ fn explicit_creation_rejects_nonempty_locations_and_existing_archives() {
             if format == StorageFormat::Legacy {
                 1
             } else {
-                2
+                3
             }
         );
     }

@@ -6,6 +6,7 @@
 //! - redb-backed metadata database for virtual directory trees
 //! - Duplicate file detection via CID multimap index
 
+mod blob_store;
 pub mod cid;
 pub mod content_store;
 pub mod metadata;
@@ -78,7 +79,7 @@ impl Store {
     /// ```text
     /// <root>/
     ///   blobs/        — LZ4-compressed content chunks (whole files in v1)
-    ///   content.redb  — v2 format/profile and ordered file manifests
+    ///   content.redb  — FastCDC format/profile and ordered file manifests
     ///   metadata.redb — virtual filesystem metadata
     /// ```
     pub fn open(root: &Path) -> Result<Self> {

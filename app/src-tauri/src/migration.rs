@@ -112,7 +112,12 @@ pub async fn workspace_storage_format(
             let _operation = OperationGuard::acquire(state)?;
             let source = source_workspace(state, &workspace_id)?;
             with_source(state, Path::new(&source.store_path), |store| {
-                Ok(store.content.format_version())
+                // The UI exposes the content family, independently of blob layout revisions.
+                Ok(if store.content.chunking_profile().is_some() {
+                    2
+                } else {
+                    1
+                })
             })
         })
         .await

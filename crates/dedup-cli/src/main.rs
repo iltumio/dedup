@@ -15,6 +15,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Upgrade a flat FastCDC archive to digest subdirectories. Re-run to resume.
+    Optimize {
+        #[arg(short = 'o', long, default_value = ".store")]
+        store: PathBuf,
+    },
     /// Migrate a legacy archive to FastCDC in a separate directory. Re-run to resume.
     Migrate {
         #[arg(long)]
@@ -125,6 +130,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Optimize { store } => {
+            let mut archive = Store::open_existing(&store)?;
+            let moved = archive.content.upgrade_blob_layout()?;
+            println!("Optimized blob layout: {moved} blobs relocated.");
+            Ok(())
+        }
         Commands::Migrate {
             source,
             destination,

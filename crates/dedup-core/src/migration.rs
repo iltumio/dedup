@@ -339,11 +339,12 @@ where
         state
     };
 
-    let target = Store {
+    let mut target = Store {
         content: ContentStore::open_with_profile(&destination, profile)?,
         metadata: MetadataDb::open(&destination.join("metadata.redb"))?,
         root: destination.clone(),
     };
+    target.content.enable_sharded_writes()?;
     let mut groups = BTreeMap::new();
     for (path, meta) in snapshot.files {
         let file_cid = cid::cid_from_bytes(&meta.cid)?;
@@ -625,13 +626,14 @@ where
         None
     };
     let resumed = verified_size == Some(expected_size);
+    let mut stored_size = None;
     if !resumed {
         ensure!(
             !should_cancel(),
             "migration cancelled; run the same command to resume"
         );
         tracker.stage(worker, path, MigrationFileStage::Converting, expected_size);
-        target
+        let stored = target
             .content
             .store_reader(
                 &file_cid,
@@ -642,6 +644,7 @@ where
                 },
             )
             .with_context(|| format!("failed to migrate CID {file_cid}"))?;
+        stored_size = Some(stored.compressed_size);
         tracker.stage(worker, path, MigrationFileStage::Verifying, expected_size);
         let actual_size = target.content.copy_to(
             &file_cid,
@@ -665,10 +668,13 @@ where
         MigrationFileStage::SavingCheckpoint,
         expected_size,
     );
-    let stored_size = target
-        .content
-        .compressed_size(&file_cid)?
-        .context("missing migrated content")?;
+    let stored_size = match stored_size {
+        Some(size) => size,
+        None => target
+            .content
+            .compressed_size(&file_cid)?
+            .context("missing migrated content")?,
+    };
     let files = files
         .into_iter()
         .map(|(path, mut meta)| {
@@ -758,7 +764,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             Store::open(target.path()).unwrap().content.format_version(),
-            2
+            3
         );
     }
 }

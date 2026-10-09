@@ -32,6 +32,12 @@ fn main() -> Result<()> {
         data.len(),
         total as f64 / 1_048_576.0
     );
+    let threads = std::env::var("DEDUP_BENCH_THREADS")
+        .unwrap_or_else(|_| "4".into())
+        .parse::<usize>()?;
+    let filesystem = std::env::var_os("DEDUP_BENCH_FS_ROOT");
+    let profile_filter = std::env::var("DEDUP_BENCH_PROFILE").ok();
+    println!("Chunk CPU threads: {threads}");
     println!("profile       write MiB/s  read MiB/s  payload MiB  index MiB  blobs");
     for (label, profile) in [
         ("whole-file", None),
@@ -46,13 +52,25 @@ fn main() -> Result<()> {
             }),
         ),
     ] {
-        let root = TempDir::new()?;
-        let store = if let Some(profile) = profile {
+        if profile_filter
+            .as_ref()
+            .is_some_and(|filter| !label.contains(filter))
+        {
+            continue;
+        }
+        let root = match &filesystem {
+            Some(path) => TempDir::new_in(path)?,
+            None => TempDir::new()?,
+        };
+        let mut store = if let Some(profile) = profile {
             ContentStore::open_with_profile(root.path(), profile)?
         } else {
             fs::create_dir(root.path().join("blobs"))?;
             ContentStore::open(root.path())?
         };
+        if profile.is_some() {
+            store.set_chunk_parallelism(threads)?;
+        }
         let start = Instant::now();
         let mut cids = BTreeSet::new();
         for bytes in &data {
@@ -69,7 +87,7 @@ fn main() -> Result<()> {
         let read_seconds = start.elapsed().as_secs_f64();
         let mut payload = 0;
         let mut count = 0;
-        for entry in fs::read_dir(root.path().join("blobs"))? {
+        for entry in walkdir::WalkDir::new(root.path().join("blobs")).follow_links(false) {
             let entry = entry?;
             if entry.path().extension().is_some_and(|ext| ext == "lz4") {
                 payload += entry.metadata()?.len();

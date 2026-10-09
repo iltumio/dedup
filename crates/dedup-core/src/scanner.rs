@@ -2965,8 +2965,8 @@ mod tests {
         .unwrap();
 
         let blobs_dir = store_dir.path().join("blobs");
-        for entry in fs::read_dir(&blobs_dir).unwrap() {
-            let path = entry.unwrap().path();
+        for entry in walkdir::WalkDir::new(&blobs_dir).follow_links(false) {
+            let path = entry.unwrap().into_path();
             if path.is_file() {
                 fs::remove_file(path).unwrap();
             }

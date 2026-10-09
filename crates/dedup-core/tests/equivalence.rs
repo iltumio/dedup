@@ -152,7 +152,7 @@ fn blob_contents(store: &Store, store_root: &Path) -> BTreeMap<String, Vec<u8>> 
     let blobs_dir = store_root.join("blobs");
     let mut blobs = BTreeMap::new();
 
-    for entry in fs::read_dir(blobs_dir).unwrap() {
+    for entry in walkdir::WalkDir::new(blobs_dir).follow_links(false) {
         let entry = entry.unwrap();
         let file_name = entry.file_name().to_string_lossy().to_string();
         if !file_name.ends_with(".lz4") {
@@ -202,8 +202,9 @@ fn add_parallel_filler(root: &Path) {
 }
 
 fn assert_no_tmp_blobs(store_root: &Path) {
-    let leftovers: Vec<String> = fs::read_dir(store_root.join("blobs"))
-        .unwrap()
+    let leftovers: Vec<String> = walkdir::WalkDir::new(store_root.join("blobs"))
+        .follow_links(false)
+        .into_iter()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
         .filter(|name| name.ends_with(".tmp"))
         .collect();

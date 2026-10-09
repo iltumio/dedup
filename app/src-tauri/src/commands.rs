@@ -629,7 +629,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
         let state = AppState::new(config_path.clone());
-        for (format, version) in [(StorageFormat::Legacy, 1), (StorageFormat::Fastcdc, 2)] {
+        for (format, version) in [(StorageFormat::Legacy, 1), (StorageFormat::Fastcdc, 3)] {
             let path = tmp.path().join(format!("archive-{version}"));
             let ws = create_archive(
                 &state,

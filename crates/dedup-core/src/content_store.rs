@@ -2,18 +2,20 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, ensure, Context, Result};
 use cid::Cid;
 use fastcdc::v2020::{Normalization, StreamCDC};
 use lz4_flex::frame::{FrameDecoder, FrameEncoder};
+use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
+use crate::blob_store::BlobStore;
 use crate::cid as cid_util;
 
-static TMP_NONCE: AtomicU64 = AtomicU64::new(0);
+const CHUNK_BATCH_BYTES: usize = 2 * 1024 * 1024;
 const CONFIG: TableDefinition<&str, &[u8]> = TableDefinition::new("config");
 const MANIFESTS: TableDefinition<&str, &[u8]> = TableDefinition::new("manifests");
 
@@ -88,10 +90,12 @@ pub(crate) struct StoredContent {
 }
 
 /// CID-addressed content storage. Legacy stores use whole-file LZ4 blobs;
-/// v2 stores use LZ4 chunks and a separate redb manifest table, preserving the
+/// v2/v3 stores use LZ4 chunks and a separate redb manifest table, preserving the
 /// whole-file CID and the legacy FileMetadata encoding.
 pub struct ContentStore {
-    blobs_dir: PathBuf,
+    blobs: BlobStore,
+    layout_version: u32,
+    chunk_pool: Option<ThreadPool>,
     manifests: Option<Database>,
     profile: Option<ChunkingProfile>,
 }
@@ -102,7 +106,7 @@ impl ContentStore {
         Self::open_impl(root, None)
     }
 
-    /// Create a v2 store, or reopen one with exactly the requested profile.
+    /// Create a sharded v3 store, or reopen one with exactly the requested profile.
     pub fn open_with_profile(root: &Path, profile: ChunkingProfile) -> Result<Self> {
         profile.validate()?;
         Self::open_impl(root, Some(profile))
@@ -120,7 +124,9 @@ impl ContentStore {
             );
             fs::create_dir_all(&blobs_dir)?;
             return Ok(Self {
-                blobs_dir,
+                blobs: BlobStore::open(blobs_dir, false, false)?,
+                layout_version: 1,
+                chunk_pool: None,
                 manifests: None,
                 profile: None,
             });
@@ -148,7 +154,7 @@ impl ContentStore {
             && root.join("migration.bin").is_file()
             && !root.join("metadata.redb").exists()
             && !blobs_dir.exists();
-        let profile = if existing && !recover_initialization {
+        let (layout_version, profile) = if existing && !recover_initialization {
             let txn = db.begin_read()?;
             let config = txn
                 .open_table(CONFIG)
@@ -156,7 +162,7 @@ impl ContentStore {
             let value = config.get("format")?.context("missing v2 format version")?;
             let config: FormatConfig = bincode::deserialize(value.value())?;
             ensure!(
-                config.version == 2,
+                matches!(config.version, 2 | 3),
                 "unsupported store format version: {}",
                 config.version
             );
@@ -167,11 +173,11 @@ impl ContentStore {
                     "store chunking profile differs from requested profile"
                 );
             }
-            config.profile
+            (config.version, config.profile)
         } else {
             let profile = requested.unwrap_or_default();
             let encoded = bincode::serialize(&FormatConfig {
-                version: 2,
+                version: 3,
                 profile,
             })?;
             let txn = db.begin_write()?;
@@ -182,48 +188,86 @@ impl ContentStore {
             }
             txn.commit()?;
             sync_dir(root)?;
-            profile
+            (3, profile)
         };
         fs::create_dir_all(&blobs_dir)?;
-        // The manifest database holds an exclusive process lock, so no v2
-        // writer can still own these temporary files after reopening.
-        for entry in fs::read_dir(&blobs_dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let parts = name.split('.').collect::<Vec<_>>();
-            if entry.file_type()?.is_file()
-                && parts.len() == 4
-                && parts[3] == "tmp"
-                && cid_util::cid_from_string(parts[0]).is_ok()
-                && parts[1].parse::<u32>().is_ok()
-                && parts[2].parse::<u64>().is_ok()
-            {
-                fs::remove_file(entry.path())?;
-            }
-        }
+        let blobs = BlobStore::open(blobs_dir, layout_version == 3, true)?;
         sync_dir(root)?;
         Ok(Self {
-            blobs_dir,
+            blobs,
+            layout_version,
+            chunk_pool: Some(Self::chunk_pool(default_chunk_threads())?),
             manifests: Some(db),
             profile: Some(profile),
         })
     }
 
     pub fn format_version(&self) -> u32 {
-        if self.manifests.is_some() {
-            2
-        } else {
-            1
-        }
+        self.layout_version
     }
+
+    fn chunk_pool(threads: usize) -> Result<ThreadPool> {
+        ensure!(
+            (1..=64).contains(&threads),
+            "chunk threads must be between 1 and 64"
+        );
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|index| format!("chunk-cpu-{index}"))
+            .build()
+            .context("failed to build chunk CPU pool")
+    }
+
+    /// CPU concurrency is independent of the number of files reading/writing.
+    /// A single large file can use the entire pool; queues remain batch bounded.
+    pub fn set_chunk_parallelism(&mut self, threads: usize) -> Result<()> {
+        ensure!(self.profile.is_some(), "chunk parallelism requires FastCDC");
+        self.chunk_pool = Some(Self::chunk_pool(threads)?);
+        Ok(())
+    }
+
+    /// Upgrade an existing flat FastCDC layout without changing CIDs or chunks.
+    /// Interrupted upgrades can be resumed; legacy archives require migration.
+    pub fn upgrade_blob_layout(&mut self) -> Result<u64> {
+        self.upgrade_blob_layout_with_cancellation(|| false)
+    }
+
+    pub(crate) fn upgrade_blob_layout_with_cancellation(
+        &mut self,
+        should_cancel: impl Fn() -> bool,
+    ) -> Result<u64> {
+        self.enable_sharded_writes()?;
+        self.blobs.upgrade(should_cancel)
+    }
+
+    // Resume starts writing into small shards immediately. Existing flat blobs
+    // stay indexed and readable; the explicit optimizer relocates them later.
+    pub(crate) fn enable_sharded_writes(&mut self) -> Result<()> {
+        ensure!(
+            self.profile.is_some(),
+            "legacy archives require migration to FastCDC"
+        );
+        if self.layout_version == 2 {
+            let encoded = bincode::serialize(&FormatConfig {
+                version: 3,
+                profile: self.profile.unwrap(),
+            })?;
+            let txn = self.manifests.as_ref().unwrap().begin_write()?;
+            txn.open_table(CONFIG)?
+                .insert("format", encoded.as_slice())?;
+            txn.commit()?;
+            self.layout_version = 3;
+        }
+        self.blobs.enable_sharding();
+        Ok(())
+    }
+
     pub fn chunking_profile(&self) -> Option<ChunkingProfile> {
         self.profile
     }
 
     fn blob_path(&self, cid: &Cid) -> PathBuf {
-        self.blobs_dir
-            .join(format!("{}.lz4", cid_util::cid_to_string(cid)))
+        self.blobs.path(cid)
     }
 
     fn manifest(&self, cid: &Cid) -> Result<Option<Manifest>> {
@@ -297,28 +341,83 @@ impl ContentStore {
         };
         let mut hasher = blake3::Hasher::new();
         let mut new_bytes = 0;
-        for chunk in StreamCDC::with_level(
+        let mut sizes = BTreeMap::new();
+        let mut directories = HashSet::new();
+        let mut stream = StreamCDC::with_level(
             reader,
             profile.min_size as usize,
             profile.avg_size as usize,
             profile.max_size as usize,
             Normalization::Level1,
-        ) {
-            let chunk = chunk.context("failed to read chunk source")?;
-            hasher.update(&chunk.data);
-            let chunk_cid = cid_util::compute_cid(&chunk.data);
-            let (size, created) = self.store_blob(&chunk_cid, &chunk.data)?;
-            if created {
-                new_bytes += size;
+        );
+        loop {
+            let mut batch = Vec::new();
+            let mut batch_bytes = 0;
+            let mut read_error = None;
+            while batch_bytes < CHUNK_BATCH_BYTES {
+                match stream.next() {
+                    Some(Ok(chunk)) => {
+                        hasher.update(&chunk.data);
+                        batch_bytes += chunk.data.len();
+                        batch.push(chunk.data);
+                    }
+                    Some(Err(error)) => {
+                        read_error = Some(error);
+                        break;
+                    }
+                    None => break,
+                }
             }
-            manifest.size += chunk.data.len() as u64;
-            manifest.chunks.push(ChunkRef {
-                cid: chunk_cid.to_bytes(),
-                size: chunk.data.len() as u64,
-            });
+            if batch.is_empty() {
+                if let Some(error) = read_error {
+                    return Err(error).context("failed to read chunk source");
+                }
+                break;
+            }
+            // Indexed parallel collection preserves the original chunk order.
+            // Only hashing/compression run on Rayon; disk I/O stays on the caller.
+            let prepared = if batch.len() == 1 {
+                batch
+                    .into_iter()
+                    .map(prepare_chunk)
+                    .collect::<Result<Vec<_>>>()
+            } else if rayon::current_thread_index().is_some() {
+                // A scan already runs on Rayon. Reuse that pool: waiting on a
+                // different pool lets the caller recursively execute other file
+                // jobs and can exhaust its stack on large scans.
+                batch
+                    .into_par_iter()
+                    .map(prepare_chunk)
+                    .collect::<Result<Vec<_>>>()
+            } else {
+                self.chunk_pool.as_ref().unwrap().install(|| {
+                    batch
+                        .into_par_iter()
+                        .map(prepare_chunk)
+                        .collect::<Result<Vec<_>>>()
+                })
+            }?;
+            for (chunk_cid, original_size, encoded) in prepared {
+                let (size, created) = self.blobs.publish(&chunk_cid, &encoded, false)?;
+                if created {
+                    new_bytes += size;
+                }
+                directories.insert(self.blob_path(&chunk_cid).parent().unwrap().to_path_buf());
+                sizes.insert(chunk_cid, size);
+                manifest.size += original_size;
+                manifest.chunks.push(ChunkRef {
+                    cid: chunk_cid.to_bytes(),
+                    size: original_size,
+                });
+            }
+            // Keep already processed chunks reusable if cancellation/read failure
+            // happened while filling a batch. Never commit a partial manifest.
+            if let Some(error) = read_error {
+                return Err(error).context("failed to read chunk source");
+            }
         }
         verify_hash(cid, &hasher)?;
-        sync_dir(&self.blobs_dir)?;
+        self.blobs.sync_directories(directories)?;
         let encoded = bincode::serialize(&manifest)?;
         let key = cid_util::cid_to_string(cid);
         let txn = self.manifests.as_ref().unwrap().begin_write()?;
@@ -332,7 +431,7 @@ impl ContentStore {
         if new_manifest {
             new_bytes += encoded.len() as u64;
         }
-        let compressed_size = self.storage_entries(cid)?.values().sum();
+        let compressed_size = sizes.values().sum::<u64>() + encoded.len() as u64;
         Ok(StoredContent {
             compressed_size,
             new_bytes,
@@ -340,53 +439,16 @@ impl ContentStore {
         })
     }
 
-    /// Serialize publication, then atomically rename durable bytes into place.
-    /// This also works on filesystems without hard links, such as exFAT.
-    /// Corrupt existing chunks are repaired from verified source bytes.
     fn store_blob(&self, cid: &Cid, data: &[u8]) -> Result<(u64, bool)> {
-        let path = self.blob_path(cid);
-        if path.is_file() && self.read_blob(cid).is_ok() {
-            return Ok((fs::metadata(path)?.len(), false));
-        }
-        let nonce = TMP_NONCE.fetch_add(1, Ordering::Relaxed);
-        let tmp = self
-            .blobs_dir
-            .join(format!("{}.{}.{}.tmp", cid, std::process::id(), nonce));
-        let result = (|| {
-            let mut encoder = FrameEncoder::new(fs::File::create(&tmp)?);
-            encoder.write_all(data)?;
-            encoder.finish()?.sync_all()?;
-            let _publication = lock_file(&self.blobs_dir.join(".publish.lock"))?;
-            if path.is_file() && self.read_blob(cid).is_ok() {
-                return Ok((fs::metadata(&path)?.len(), false));
-            }
-            let created = !path.is_file();
-            fs::rename(&tmp, &path).with_context(|| format!("failed to publish blob {cid}"))?;
-            sync_dir(&self.blobs_dir)?;
-            Ok((fs::metadata(&path)?.len(), created))
-        })();
-        let _ = fs::remove_file(&tmp);
-        result
+        self.blobs.store(cid, data)
     }
 
     fn read_blob(&self, cid: &Cid) -> Result<Vec<u8>> {
-        let mut decoder = self.blob_reader(cid)?;
-        let mut data = Vec::new();
-        decoder
-            .read_to_end(&mut data)
-            .context("failed to decompress blob")?;
-        ensure!(
-            cid_util::compute_cid(&data) == *cid,
-            "blob CID mismatch: {cid}"
-        );
-        Ok(data)
+        self.blobs.read(cid)
     }
 
     fn blob_reader(&self, cid: &Cid) -> Result<FrameDecoder<fs::File>> {
-        Ok(FrameDecoder::new(
-            fs::File::open(self.blob_path(cid))
-                .with_context(|| format!("blob not found: {cid}"))?,
-        ))
+        self.blobs.reader(cid)
     }
 
     pub(crate) fn migration_reader(&self, cid: &Cid) -> Result<impl Read> {
@@ -478,6 +540,17 @@ impl ContentStore {
     }
 }
 
+fn prepare_chunk(data: Vec<u8>) -> Result<(Cid, u64, Vec<u8>)> {
+    let cid = cid_util::compute_cid(&data);
+    let mut encoder = FrameEncoder::new(Vec::new());
+    encoder.write_all(&data)?;
+    Ok((cid, data.len() as u64, encoder.finish()?))
+}
+
+fn default_chunk_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(4))
+}
+
 fn verify_hash(cid: &Cid, hasher: &blake3::Hasher) -> Result<()> {
     let hash = cid::multihash::Multihash::<64>::wrap(0x1e, hasher.finalize().as_bytes())?;
     if Cid::new_v1(0x55, hash) != *cid {
@@ -514,6 +587,196 @@ mod tests {
     use super::*;
     use crate::cid::compute_cid;
     use tempfile::TempDir;
+
+    fn payload(size: usize) -> Vec<u8> {
+        let mut seed = 0x123456789abcdefu64;
+        (0..size)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect()
+    }
+
+    fn make_flat_v2(root: &Path, bytes: &[u8]) -> Cid {
+        let store = ContentStore::open(root).unwrap();
+        let cid = compute_cid(bytes);
+        store.store(&cid, bytes).unwrap();
+        for entry in walkdir::WalkDir::new(root.join("blobs")).follow_links(false) {
+            let entry = entry.unwrap();
+            if entry.path().extension().is_some_and(|e| e == "lz4") {
+                fs::rename(entry.path(), root.join("blobs").join(entry.file_name())).unwrap();
+            }
+        }
+        let txn = store.manifests.as_ref().unwrap().begin_write().unwrap();
+        let config = bincode::serialize(&FormatConfig {
+            version: 2,
+            profile: ChunkingProfile::default(),
+        })
+        .unwrap();
+        txn.open_table(CONFIG)
+            .unwrap()
+            .insert("format", config.as_slice())
+            .unwrap();
+        txn.commit().unwrap();
+        cid
+    }
+
+    #[test]
+    fn flat_v2_upgrade_is_readable_after_cancellation_and_resume() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = TempDir::new().unwrap();
+        let bytes = payload(4 * 1024 * 1024);
+        let cid = make_flat_v2(root.path(), &bytes);
+        let mut store = ContentStore::open(root.path()).unwrap();
+        assert_eq!(store.format_version(), 2);
+        assert_eq!(store.read(&cid).unwrap(), bytes);
+        // Also relocate blobs added after opening the old layout.
+        let extra = b"a newly added v2 file";
+        let extra_cid = compute_cid(extra);
+        store.store(&extra_cid, extra).unwrap();
+        let checks = AtomicUsize::new(0);
+        assert!(store
+            .upgrade_blob_layout_with_cancellation(|| checks.fetch_add(1, Ordering::Relaxed) == 3)
+            .is_err());
+        drop(store);
+        let mut reopened = ContentStore::open(root.path()).unwrap();
+        assert_eq!(reopened.format_version(), 3);
+        assert_eq!(reopened.read(&cid).unwrap(), bytes);
+        assert_eq!(reopened.read(&extra_cid).unwrap(), extra);
+        assert!(reopened.upgrade_blob_layout().unwrap() > 0);
+        assert_eq!(reopened.upgrade_blob_layout().unwrap(), 0);
+        assert!(fs::read_dir(root.path().join("blobs")).unwrap().all(|e| e
+            .unwrap()
+            .path()
+            .extension()
+            .is_none_or(|e| e != "lz4")));
+        drop(reopened);
+        assert_eq!(
+            ContentStore::open(root.path()).unwrap().read(&cid).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn flat_v2_upgrade_on_configurable_filesystem() {
+        let root = match std::env::var_os("DEDUP_TEST_FS_ROOT") {
+            Some(path) => TempDir::new_in(path).unwrap(),
+            None => TempDir::new().unwrap(),
+        };
+        let data = b"small flat FastCDC archive";
+        let cid = make_flat_v2(root.path(), data);
+        let mut store = ContentStore::open(root.path()).unwrap();
+        assert_eq!(store.upgrade_blob_layout().unwrap(), 1);
+        assert_eq!(store.read(&cid).unwrap(), data);
+        drop(store);
+        let reopened = ContentStore::open(root.path()).unwrap();
+        assert_eq!(reopened.format_version(), 3);
+        assert_eq!(reopened.read(&cid).unwrap(), data);
+    }
+
+    #[test]
+    fn mixed_layout_reuses_flat_chunks_and_shards_new_chunks() {
+        let root = TempDir::new().unwrap();
+        let bytes = payload(4 * 1024 * 1024);
+        let cid = make_flat_v2(root.path(), &bytes);
+        let mut store = ContentStore::open(root.path()).unwrap();
+        let extra = b"new flat blob after open";
+        let extra_cid = compute_cid(extra);
+        store.store(&extra_cid, extra).unwrap();
+        store.enable_sharded_writes().unwrap();
+        assert_eq!(store.read(&extra_cid).unwrap(), extra);
+        let old_chunks = store.manifest(&cid).unwrap().unwrap().chunks.len();
+        let mut shifted = bytes.clone();
+        shifted.splice(8192..8192, b"inserted bytes".iter().copied());
+        let shifted_cid = compute_cid(&shifted);
+        store.store(&shifted_cid, &shifted).unwrap();
+        let all = walkdir::WalkDir::new(root.path().join("blobs"))
+            .into_iter()
+            .map(|e| e.unwrap().into_path())
+            .filter(|p| p.extension().is_some_and(|e| e == "lz4"))
+            .collect::<Vec<_>>();
+        assert!(
+            all.len() < old_chunks + 6,
+            "shared flat chunks were duplicated"
+        );
+        assert!(all
+            .iter()
+            .any(|p| p.parent().unwrap() != root.path().join("blobs")));
+        assert!(all
+            .iter()
+            .any(|p| p.parent().unwrap() == root.path().join("blobs")));
+        drop(store);
+        let reopened = ContentStore::open(root.path()).unwrap();
+        assert_eq!(reopened.read(&cid).unwrap(), bytes);
+        assert_eq!(reopened.read(&extra_cid).unwrap(), extra);
+        assert_eq!(reopened.read(&shifted_cid).unwrap(), shifted);
+    }
+
+    #[test]
+    fn chunk_parallelism_preserves_sequential_fastcdc_boundaries() {
+        let bytes = payload(8 * 1024 * 1024);
+        let cid = compute_cid(&bytes);
+        let expected = fastcdc::v2020::FastCDC::with_level(
+            &bytes,
+            16384,
+            65536,
+            262144,
+            Normalization::Level1,
+        )
+        .map(|chunk| {
+            (
+                compute_cid(&bytes[chunk.offset..chunk.offset + chunk.length]).to_bytes(),
+                chunk.length as u64,
+            )
+        })
+        .collect::<Vec<_>>();
+        let mut first_manifest = None;
+        for threads in [1, 2, 4, 8] {
+            let root = TempDir::new().unwrap();
+            let mut store = ContentStore::open(root.path()).unwrap();
+            store.set_chunk_parallelism(threads).unwrap();
+            let stored_size = store.store(&cid, &bytes).unwrap();
+            let manifest = store.manifest(&cid).unwrap().unwrap();
+            assert_eq!(
+                manifest
+                    .chunks
+                    .iter()
+                    .map(|c| (c.cid.clone(), c.size))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let encoded = bincode::serialize(&manifest).unwrap();
+            if let Some(first) = &first_manifest {
+                assert_eq!(first, &encoded);
+            } else {
+                first_manifest = Some(encoded);
+            }
+            assert_eq!(store.compressed_size(&cid).unwrap().unwrap(), stored_size);
+            assert_eq!(store.read(&cid).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn sharded_reopen_cleans_only_owned_temporaries() {
+        let root = TempDir::new().unwrap();
+        let store = ContentStore::open(root.path()).unwrap();
+        let bytes = b"temporary cleanup";
+        let cid = compute_cid(bytes);
+        store.store(&cid, bytes).unwrap();
+        let directory = store.blob_path(&cid).parent().unwrap().to_path_buf();
+        let temporary = directory.join(format!("{cid}.123.45.tmp"));
+        let unrelated = directory.join("keep.tmp");
+        fs::write(&temporary, b"unfinished").unwrap();
+        fs::write(&unrelated, b"preserve").unwrap();
+        drop(store);
+        let store = ContentStore::open(root.path()).unwrap();
+        assert!(!temporary.exists());
+        assert_eq!(fs::read(unrelated).unwrap(), b"preserve");
+        assert_eq!(store.read(&cid).unwrap(), bytes);
+    }
 
     #[test]
     fn unknown_store_versions_are_rejected() {
@@ -618,8 +881,9 @@ mod tests {
         assert!(store.exists(&cid));
         assert_eq!(store.read(&cid).unwrap(), data);
 
-        let leftover_tmp: Vec<String> = fs::read_dir(tmp.path().join("blobs"))
-            .unwrap()
+        let leftover_tmp: Vec<String> = walkdir::WalkDir::new(tmp.path().join("blobs"))
+            .follow_links(false)
+            .into_iter()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
             .filter(|name| name.ends_with(".tmp"))
             .collect();
