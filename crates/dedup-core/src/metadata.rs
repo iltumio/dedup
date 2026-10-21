@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use redb::{
@@ -18,6 +18,103 @@ const CID_PATHS_TABLE: MultimapTableDefinition<&str, &str> =
 /// Directory path → bincode-serialized DirMetadata
 const DIRS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("dirs");
 
+type EntryTable<'a> = redb::Table<'a, &'static str, &'static [u8]>;
+
+fn validate_virtual_path(path: &str) -> Result<()> {
+    anyhow::ensure!(
+        path == "/"
+            || (path.starts_with('/')
+                && path[1..]
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != "..")
+                && !path.chars().any(char::is_control)),
+        "Invalid archive path: {path}"
+    );
+    Ok(())
+}
+
+fn parent_path(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some(("", _)) => "/",
+        Some((parent, _)) => parent,
+        None => "/",
+    }
+}
+
+fn has_descendants(table: &EntryTable<'_>, path: &str) -> Result<bool> {
+    let prefix = format!("{path}/");
+    match table.range::<&str>(prefix.as_str()..)?.next() {
+        Some(row) => Ok(row?.0.value().starts_with(&prefix)),
+        None => Ok(false),
+    }
+}
+
+fn is_directory(paths: &EntryTable<'_>, dirs: &EntryTable<'_>, path: &str) -> Result<bool> {
+    Ok(path == "/"
+        || dirs.get(path)?.is_some()
+        || has_descendants(paths, path)?
+        || has_descendants(dirs, path)?)
+}
+
+fn entry_exists(paths: &EntryTable<'_>, dirs: &EntryTable<'_>, path: &str) -> Result<bool> {
+    Ok(paths.get(path)?.is_some() || is_directory(paths, dirs, path)?)
+}
+
+fn subtree_entries(table: &EntryTable<'_>, path: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut entries = Vec::new();
+    if let Some(value) = table.get(path)? {
+        entries.push((path.to_owned(), value.value().to_vec()));
+    }
+    let prefix = format!("{path}/");
+    for row in table.range::<&str>(prefix.as_str()..)? {
+        let (key, value) = row?;
+        if !key.value().starts_with(&prefix) {
+            break;
+        }
+        entries.push((key.value().to_owned(), value.value().to_vec()));
+    }
+    Ok(entries)
+}
+
+/// Refresh only the changed parents, seeking past grandchildren in each table.
+fn refresh_parent(paths: &EntryTable<'_>, dirs: &mut EntryTable<'_>, path: &str) -> Result<()> {
+    let prefix = if path == "/" {
+        "/".to_owned()
+    } else {
+        format!("{path}/")
+    };
+    let mut children = HashSet::new();
+    for table in [paths, &*dirs] {
+        let mut range = table.range::<&str>(prefix.as_str()..)?;
+        while let Some(row) = range.next() {
+            let (key, _) = row?;
+            if !key.value().starts_with(&prefix) {
+                break;
+            }
+            let remainder = &key.value()[prefix.len()..];
+            let child = remainder.split('/').next().unwrap_or_default();
+            if !child.is_empty() {
+                children.insert(child.to_owned());
+            }
+            if remainder.contains('/') {
+                let next = format!("{prefix}{child}0");
+                range = table.range::<&str>(next.as_str()..)?;
+            }
+        }
+    }
+    let mut meta = match dirs.get(path)? {
+        Some(value) => bincode::deserialize::<DirMetadata>(value.value())?,
+        None => DirMetadata {
+            child_count: 0,
+            modified: 0,
+        },
+    };
+    meta.child_count = children.len() as u64;
+    let encoded = bincode::serialize(&meta)?;
+    dirs.insert(path, encoded.as_slice())?;
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 pub(crate) struct MetadataSnapshot {
     pub files: Vec<(String, FileMetadata)>,
@@ -30,6 +127,116 @@ pub struct MetadataDb {
 }
 
 impl MetadataDb {
+    /// Create an empty virtual directory without changing stored content.
+    pub fn create_dir(&self, path: &str) -> Result<()> {
+        validate_virtual_path(path)?;
+        anyhow::ensure!(path != "/", "The archive root already exists");
+        let txn = self.db.begin_write()?;
+        {
+            let paths = txn.open_table(PATHS_TABLE)?;
+            let mut dirs = txn.open_table(DIRS_TABLE)?;
+            anyhow::ensure!(
+                !entry_exists(&paths, &dirs, path)?,
+                "An entry already exists: {path}"
+            );
+            let parent = parent_path(path);
+            anyhow::ensure!(
+                paths.get(parent)?.is_none() && is_directory(&paths, &dirs, parent)?,
+                "Destination folder not found: {parent}"
+            );
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs() as i64;
+            let encoded = bincode::serialize(&DirMetadata {
+                child_count: 0,
+                modified: now,
+            })?;
+            dirs.insert(path, encoded.as_slice())?;
+            refresh_parent(&paths, &mut dirs, parent)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Move a selection into an existing directory in one atomic transaction.
+    /// Content and file metadata are preserved; conflicting names never overwrite.
+    pub fn move_entries(&self, sources: &[String], destination: &str) -> Result<()> {
+        validate_virtual_path(destination)?;
+        anyhow::ensure!(!sources.is_empty(), "Select at least one entry to move");
+        for source in sources {
+            validate_virtual_path(source)?;
+            anyhow::ensure!(source != "/", "The archive root cannot be moved");
+        }
+        let txn = self.db.begin_write()?;
+        {
+            let mut paths = txn.open_table(PATHS_TABLE)?;
+            let mut dirs = txn.open_table(DIRS_TABLE)?;
+            let mut cid_paths = txn.open_multimap_table(CID_PATHS_TABLE)?;
+            anyhow::ensure!(
+                paths.get(destination)?.is_none() && is_directory(&paths, &dirs, destination)?,
+                "Destination folder not found: {destination}"
+            );
+            let mut targets = HashSet::new();
+            let mut moves = Vec::new();
+            for (i, source) in sources.iter().enumerate() {
+                anyhow::ensure!(
+                    entry_exists(&paths, &dirs, source)?,
+                    "Entry not found: {source}"
+                );
+                anyhow::ensure!(
+                    !sources[..i].iter().any(|other| other == source
+                        || source.starts_with(&format!("{other}/"))
+                        || other.starts_with(&format!("{source}/"))),
+                    "Select each entry only once, without its parent folder"
+                );
+                anyhow::ensure!(
+                    destination != source && !destination.starts_with(&format!("{source}/")),
+                    "Cannot move a folder into itself: {source}"
+                );
+                let name = source.rsplit('/').next().unwrap();
+                let target = format!("{}/{name}", destination.trim_end_matches('/'));
+                anyhow::ensure!(
+                    target != *source,
+                    "Entry is already in this folder: {source}"
+                );
+                anyhow::ensure!(
+                    targets.insert(target.clone()) && !entry_exists(&paths, &dirs, &target)?,
+                    "An entry already exists: {target}"
+                );
+                moves.push((source, target));
+            }
+            let mut parents = HashSet::from([destination.to_owned()]);
+            for (source, target) in moves {
+                let moving_directory = paths.get(source.as_str())?.is_none();
+                let files = subtree_entries(&paths, source)?;
+                let directories = subtree_entries(&dirs, source)?;
+                for (old, encoded) in files {
+                    let new = format!("{target}{}", &old[source.len()..]);
+                    let meta: FileMetadata = bincode::deserialize(&encoded)?;
+                    let cid = crate::cid::cid_to_string(&crate::cid::cid_from_bytes(&meta.cid)?);
+                    paths.remove(old.as_str())?;
+                    paths.insert(new.as_str(), encoded.as_slice())?;
+                    cid_paths.remove(cid.as_str(), old.as_str())?;
+                    cid_paths.insert(cid.as_str(), new.as_str())?;
+                }
+                for (old, encoded) in directories {
+                    let new = format!("{target}{}", &old[source.len()..]);
+                    dirs.remove(old.as_str())?;
+                    dirs.insert(new.as_str(), encoded.as_slice())?;
+                }
+                if moving_directory && dirs.get(target.as_str())?.is_none() {
+                    refresh_parent(&paths, &mut dirs, &target)?;
+                }
+                parents.insert(parent_path(source).to_owned());
+            }
+            for parent in parents {
+                refresh_parent(&paths, &mut dirs, &parent)?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
     /// Open or create the metadata database at the given path.
     pub fn open(path: &Path) -> Result<Self> {
         let db = Database::create(path)
@@ -297,6 +504,15 @@ impl MetadataDb {
 
             let remainder = &key_str[prefix.len()..];
             if let Some(slash_pos) = remainder.find('/') {
+                let name = &remainder[..slash_pos];
+                if seen.insert(name.to_owned()) {
+                    entries.push(DirEntry {
+                        name: name.to_owned(),
+                        is_dir: true,
+                        size: 0,
+                        modified: 0,
+                    });
+                }
                 let after_subtree = format!("{}{}0", prefix, &remainder[..slash_pos]);
                 dir_range = dirs_table.range::<&str>(after_subtree.as_str()..)?;
                 continue;

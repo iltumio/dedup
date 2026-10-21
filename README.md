@@ -158,6 +158,15 @@ dedup ls /
 dedup ls /photos/vacation
 ```
 
+### Reorganize files and folders in the desktop app
+
+In the desktop app's **Files** view, use **New folder** to create a folder in
+the current location. Select files or folders with the checkboxes, then choose
+**Move selected**. Browse to a destination (or create one in the dialog) and
+choose **Move here**. You can also move items back to **All files**, the archive
+root. Folders move with all their contents. Moves update virtual paths atomically,
+preserve file content and metadata, and never replace an existing entry.
+
 ### Inspect a file
 
 ```sh

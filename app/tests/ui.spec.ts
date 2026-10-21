@@ -3,6 +3,87 @@ import AxeBuilder from "@axe-core/playwright";
 
 import { fixture } from "./fixture";
 
+test("root files can be moved together into a newly created archive folder", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 500 });
+  await fixture(page);
+  await page.getByRole("checkbox", { name: "Select photo-001.jpg", exact: true }).check();
+  await page.getByRole("checkbox", { name: "Select photo-002.jpg", exact: true }).check();
+  await page.getByRole("button", { name: "Move selected", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Move selected items", exact: true });
+  await expect(dialog.getByRole("button", { name: "Move here" })).toBeDisabled();
+  await dialog.getByRole("textbox", { name: "New folder name" }).fill("Photos");
+  await dialog.getByRole("button", { name: "Create folder", exact: true }).click();
+  await expect(dialog.getByText("/Photos", { exact: true })).toBeVisible();
+  const accessibility = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
+  expect(accessibility.violations).toEqual([]);
+  await expect(dialog.getByRole("button", { name: "Move here" })).toBeInViewport();
+  await dialog.getByRole("button", { name: "Move here" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "photo-001.jpg", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Move selected", exact: true })).toBeDisabled();
+  expect(await page.evaluate(() => (window as any).__dedupTest.editCalls)).toEqual([
+    { cmd: "create_dir", path: "/Photos" },
+    { cmd: "move_entries", sources: ["/photo-001.jpg", "/photo-002.jpg"], destination: "/Photos" },
+  ]);
+  await page.getByRole("button", { name: "Photos", exact: true }).click();
+  await expect(page.getByRole("button", { name: "photo-001.jpg", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "photo-002.jpg", exact: true })).toBeVisible();
+});
+
+test("folders can be created in the current location and moved with their contents", async ({ page }) => {
+  await fixture(page);
+  await page.getByRole("button", { name: "New folder", exact: true }).click();
+  const create = page.getByRole("dialog", { name: "New folder", exact: true });
+  await create.getByRole("textbox", { name: "Folder name", exact: true }).fill("../outside");
+  await expect(create.getByRole("button", { name: "Create folder", exact: true })).toBeDisabled();
+  await create.getByRole("textbox", { name: "Folder name", exact: true }).fill("Albums");
+  await create.getByRole("textbox", { name: "Folder name", exact: true }).press("Enter");
+  await expect(create).not.toBeVisible();
+  await page.getByRole("checkbox", { name: "Select Vacations", exact: true }).check();
+  await page.getByRole("button", { name: "Move selected", exact: true }).click();
+  const move = page.getByRole("dialog", { name: "Move selected items", exact: true });
+  await expect(move.getByRole("button", { name: "Vacations", exact: true })).toHaveCount(0);
+  await move.getByRole("button", { name: "Albums", exact: true }).click();
+  await move.getByRole("button", { name: "Move here" }).click();
+  await page.getByRole("button", { name: "Albums", exact: true }).click();
+  await page.getByRole("button", { name: "Vacations", exact: true }).click();
+  await expect(page.getByRole("button", { name: "copy.jpg", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "New folder", exact: true }).click();
+  await create.getByRole("textbox", { name: "Folder name", exact: true }).fill("Summer");
+  await create.getByRole("button", { name: "Create folder", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Summer", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__dedupTest.editCalls.at(-1))).toEqual({ cmd: "create_dir", path: "/Albums/Vacations/Summer" });
+});
+
+test("move cancellation, conflicts and failures retain the selection and allow retry", async ({ page }) => {
+  await fixture(page);
+  await page.getByRole("checkbox", { name: "Select photo-001.jpg", exact: true }).check();
+  await page.getByRole("button", { name: "Move selected", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Move selected items", exact: true });
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: "Select photo-001.jpg", exact: true })).toBeChecked();
+  expect(await page.evaluate(() => (window as any).__dedupTest.editCalls)).toEqual([]);
+  await page.getByRole("button", { name: "Move selected", exact: true }).click();
+  await dialog.getByRole("textbox", { name: "New folder name" }).fill("Vacations");
+  await dialog.getByRole("button", { name: "Create folder", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("An entry already exists");
+  await dialog.getByRole("button", { name: "Vacations", exact: true }).click();
+  await page.evaluate(() => { (window as any).__dedupTest.failEdit = true; });
+  await dialog.getByRole("button", { name: "Move here" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Archive is read-only");
+  await page.evaluate(() => { (window as any).__dedupTest.failEdit = false; });
+  await dialog.getByRole("button", { name: "Move here" }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole("button", { name: "Vacations", exact: true }).click();
+  await expect(page.getByRole("button", { name: "photo-001.jpg", exact: true })).toBeVisible();
+  await page.getByRole("checkbox", { name: "Select photo-001.jpg", exact: true }).check();
+  await page.getByRole("button", { name: "Move selected", exact: true }).click();
+  await dialog.getByRole("button", { name: "All files", exact: true }).click();
+  await dialog.getByRole("button", { name: "Move here" }).click();
+  await page.getByRole("navigation", { name: "Folder path", exact: true }).getByRole("button", { name: "All files", exact: true }).click();
+  await expect(page.getByRole("button", { name: "photo-001.jpg", exact: true })).toBeVisible();
+});
+
 async function startScan(page: Page) {
   await page.getByRole("button", { name: "Add folder", exact: true }).click();
   await page

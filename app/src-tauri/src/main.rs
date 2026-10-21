@@ -21,6 +21,8 @@ fn main() {
         .manage(AppState::new(config_path))
         .invoke_handler(tauri::generate_handler![
             commands::list_dir,
+            commands::create_dir,
+            commands::move_entries,
             commands::get_file_metadata,
             commands::read_file,
             commands::find_duplicates,

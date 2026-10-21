@@ -221,6 +221,16 @@ impl Store {
         self.metadata.list_dir(path)
     }
 
+    /// Create an empty folder in the archive's virtual filesystem.
+    pub fn create_dir(&self, path: &str) -> Result<()> {
+        self.metadata.create_dir(path)
+    }
+
+    /// Move files or entire folders without copying their content.
+    pub fn move_entries(&self, sources: &[String], destination: &str) -> Result<()> {
+        self.metadata.move_entries(sources, destination)
+    }
+
     /// Get metadata for a virtual file path.
     pub fn get_file(&self, path: &str) -> Result<Option<FileMetadata>> {
         self.metadata.get_file(path)

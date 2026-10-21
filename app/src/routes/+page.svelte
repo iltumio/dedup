@@ -434,6 +434,10 @@
               {selectedPath}
               onSelect={handleSelect}
               onScanInto={goToScan}
+              onChanged={() => {
+                selectedPath = null;
+                selectedEntry = null;
+              }}
               initialPath={browserPath}
               onNavigate={(path) => {
                 browserPath = path;

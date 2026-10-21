@@ -86,7 +86,7 @@
       <div class="min-w-0">
         <h2 id={titleId} class="truncate text-sm font-semibold">{title}</h2>
         {#if description}
-          <p id={descriptionId} class="mt-1 text-xs text-base-content/60">
+          <p id={descriptionId} class="mt-1 text-xs text-base-content/70">
             {description}
           </p>
         {/if}

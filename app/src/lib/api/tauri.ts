@@ -63,6 +63,14 @@ export async function listDir(path: string): Promise<DirEntry[]> {
 	return invoke('list_dir', { path });
 }
 
+export async function createDir(path: string): Promise<void> {
+	return invoke('create_dir', { path });
+}
+
+export async function moveEntries(sources: string[], destination: string): Promise<void> {
+	return invoke('move_entries', { sources, destination });
+}
+
 export async function getFileMetadata(path: string): Promise<FileMetadata | null> {
 	return invoke('get_file_metadata', { path });
 }

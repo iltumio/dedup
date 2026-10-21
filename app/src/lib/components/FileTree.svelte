@@ -2,11 +2,15 @@
   import UiSelect from "./ui/UiSelect.svelte";
   import {
     listDir,
+    createDir,
     formatSize,
     formatTimestamp,
     type DirEntry,
   } from "$lib/api/tauri";
   import Icon from "./ui/Icon.svelte";
+  import UiDialog from "./ui/UiDialog.svelte";
+  import MoveEntriesDialog from "./MoveEntriesDialog.svelte";
+  import { app } from "$lib/state/app.svelte";
   let {
     selectedPath,
     onSelect,
@@ -14,6 +18,7 @@
     initialPath = "/",
     expectContent = false,
     onNavigate,
+    onChanged,
   }: {
     selectedPath: string | null;
     onSelect: (path: string, entry: DirEntry) => void;
@@ -21,6 +26,7 @@
     initialPath?: string;
     expectContent?: boolean;
     onNavigate?: (path: string) => void;
+    onChanged?: () => void;
   } = $props();
   let currentPath = $state("/");
   let entries = $state<DirEntry[]>([]);
@@ -30,6 +36,15 @@
   let sort = $state("name");
   let page = $state(1);
   let refresh = $state(0);
+  let checked = $state<string[]>([]);
+  let showCreate = $state(false);
+  let showMove = $state(false);
+  let folderName = $state("");
+  let editError = $state<string | null>(null);
+  let editing = $state(false);
+  const editsDisabled = $derived(app.scanning || app.migrating || editing);
+  const validFolderName = $derived(folderName.trim() !== "" && !/[\/\\\x00-\x1f]/.test(folderName)
+    && folderName.trim() !== "." && folderName.trim() !== "..");
   let searchInput: HTMLInputElement;
   const pageSize = 100;
   const crumbs = $derived(currentPath.split("/").filter(Boolean));
@@ -52,6 +67,7 @@
   const visible = $derived(
     filtered.slice((page - 1) * pageSize, page * pageSize),
   );
+  const allVisibleChecked = $derived(visible.length > 0 && visible.every(entry => checked.includes(entry.name)));
   $effect(() => {
     currentPath = initialPath;
   });
@@ -64,7 +80,10 @@
     entries = [];
     listDir(path)
       .then((result) => {
-        if (active) entries = result;
+        if (active) {
+          entries = result;
+          checked = checked.filter(name => result.some(entry => entry.name === name));
+        }
       })
       .catch((e) => {
         if (
@@ -91,8 +110,29 @@
   });
   function navigate(path: string) {
     currentPath = path;
+    checked = [];
     query = "";
     onNavigate?.(path);
+  }
+  function toggle(name: string) {
+    checked = checked.includes(name) ? checked.filter(item => item !== name) : [...checked, name];
+  }
+  function toggleVisible() {
+    checked = allVisibleChecked ? checked.filter(name => !visible.some(entry => entry.name === name))
+      : [...new Set([...checked, ...visible.map(entry => entry.name)])];
+  }
+  async function createFolder() {
+    if (editsDisabled || !validFolderName) return;
+    editing = true;
+    editError = null;
+    try {
+      await createDir(`${currentPath === "/" ? "" : currentPath}/${folderName.trim()}`);
+      showCreate = false;
+      query = "";
+      refresh++;
+      onChanged?.();
+    } catch (e) { editError = String(e); }
+    finally { editing = false; }
   }
   function open(entry: DirEntry) {
     const path = `${currentPath === "/" ? "" : currentPath}/${entry.name}`;
@@ -148,6 +188,16 @@
       ]}
     />
   </div>
+  <div class="organize-tools">
+    <span class="text-sm text-base-content/70" role="status">{checked.length ? `${checked.length} selected` : "Select items to move"}</span>
+    <div class="flex gap-2">
+      {#if checked.length}<button class="btn btn-sm" type="button" onclick={() => checked = []}>Clear selection</button>{/if}
+      <button class="btn btn-sm" type="button" disabled={editsDisabled || loading || !!error}
+        onclick={() => { folderName = ""; editError = null; showCreate = true; }}><Icon name="plus" size={15} />New folder</button>
+      <button class="btn btn-sm" type="button" disabled={editsDisabled || loading || !checked.length}
+        onclick={() => showMove = true}>Move selected</button>
+    </div>
+  </div>
   <div class="browser-scroll" aria-busy={loading}>
     {#if error}<div class="empty-panel">
         <h2>Folder unavailable</h2>
@@ -184,7 +234,7 @@
     {:else}<table class="file-table">
         <thead
           ><tr
-            ><th scope="col">Name</th><th scope="col">Size</th><th
+            ><th scope="col"><div class="name-with-selection"><input class="checkbox checkbox-sm" type="checkbox" aria-label="Select visible items" checked={allVisibleChecked} indeterminate={visible.some(entry => checked.includes(entry.name)) && !allVisibleChecked} disabled={editsDisabled} onchange={toggleVisible} /><span>Name</span></div></th><th scope="col">Size</th><th
               scope="col"
               class="modified-column">Modified</th
             ></tr
@@ -194,7 +244,7 @@
               class:selected={selectedPath === fullPath}
               aria-selected={selectedPath === fullPath}
               ><td
-                ><button
+                ><div class="name-with-selection"><input class="checkbox checkbox-sm" type="checkbox" aria-label={`Select ${entry.name}`} checked={checked.includes(entry.name)} disabled={editsDisabled} onchange={() => toggle(entry.name)} /><button
                   class="file-name"
                   type="button"
                   title={entry.name}
@@ -208,7 +258,7 @@
                       name="chevron"
                       size={14}
                     />{/if}</button
-                ></td
+                ></div></td
               ><td class="font-path"
                 >{entry.is_dir ? "—" : formatSize(entry.size)}</td
               ><td class="modified-column">{formatTimestamp(entry.modified)}</td
@@ -236,3 +286,28 @@
       </div>{/if}
   </footer>
 </div>
+
+<UiDialog open={showCreate} title="New folder" description={`Create a folder inside ${currentPath}.`}
+  closeDisabled={editing} onClose={() => showCreate = false}>
+  <form id="create-archive-folder" onsubmit={(event) => { event.preventDefault(); void createFolder(); }}>
+    <label class="block text-sm mb-1" for="archive-folder-name">Folder name</label>
+    <input id="archive-folder-name" class="input input-bordered w-full" bind:value={folderName} disabled={editing} autocomplete="off" />
+    {#if editError}<p class="notice notice-error mt-3 break-all" role="alert">{editError}</p>{/if}
+  </form>
+  {#snippet actions()}
+    <button class="btn" type="button" disabled={editing} onclick={() => showCreate = false}>Cancel</button>
+    <button class="btn btn-primary" type="submit" form="create-archive-folder" disabled={editsDisabled || !validFolderName}>{editing ? "Creating…" : "Create folder"}</button>
+  {/snippet}
+</UiDialog>
+{#if showMove}
+  <MoveEntriesDialog sources={checked.map(name => `${currentPath === "/" ? "" : currentPath}/${name}`)} initialPath={currentPath}
+    onClose={() => showMove = false} onCreated={() => refresh++}
+    onMoved={() => { showMove = false; checked = []; refresh++; onChanged?.(); }} />
+{/if}
+
+<style>
+  .organize-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 0 20px 12px; }
+  .name-with-selection { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .name-with-selection > input { flex-shrink: 0; }
+  .name-with-selection > button { min-width: 0; }
+</style>

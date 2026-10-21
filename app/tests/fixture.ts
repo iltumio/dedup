@@ -38,6 +38,11 @@ export async function fixture(page: Page, empty = false) {
       let nextId = 1;
       let listener = 0;
       const result = { ...stats, skipped_files: 2, errors_log_path: null };
+      const tree = new Map<string, any[]>([
+        ["/", [{ name: "Vacations", is_dir: true, size: 0, modified: 1700000000 },
+          ...Array.from({ length: 250 }, (_, i) => ({ name: `photo-${String(i).padStart(3, "0")}.jpg`, is_dir: false, size: i + 100, modified: 1700000000 }))]],
+        ["/Vacations", [{ name: "copy.jpg", is_dir: false, size: 100, modified: 1700000000 }]],
+      ]);
       const api = (w.__dedupTest = {
         calls: [] as string[],
         delayed: false,
@@ -48,6 +53,8 @@ export async function fixture(page: Page, empty = false) {
         storageFormat: 1,
         migrationCalls: [] as any[],
         createCalls: [] as any[],
+        editCalls: [] as any[],
+        failEdit: false,
         emitMigration: (overrides = {}, jobId?: string) => callbacks.get(migrationListener)?.({
           event: "migration-progress", id: 2,
           payload: { job_id: jobId ?? migrationArgs?.jobId,
@@ -156,30 +163,41 @@ export async function fixture(page: Page, empty = false) {
                 config.workspaces.push(ws);
             return structuredClone(config);
           }
-          if (cmd === "list_dir")
-            return args.path === "/"
-              ? [
-                  {
-                    name: "Vacations",
-                    is_dir: true,
-                    size: 0,
-                    modified: 1700000000,
-                  },
-                  ...Array.from({ length: 250 }, (_, i) => ({
-                    name: `photo-${String(i).padStart(3, "0")}.jpg`,
-                    is_dir: false,
-                    size: i + 100,
-                    modified: 1700000000,
-                  })),
-                ]
-              : [
-                  {
-                    name: "copy.jpg",
-                    is_dir: false,
-                    size: 100,
-                    modified: 1700000000,
-                  },
-                ];
+          if (cmd === "list_dir") return structuredClone(tree.get(args.path) ?? []);
+          if (cmd === "create_dir" || cmd === "move_entries") {
+            api.editCalls.push({ cmd, ...structuredClone(args) });
+            if (api.failEdit) throw Error("Archive is read-only");
+            if (cmd === "create_dir") {
+              const parent = args.path.slice(0, args.path.lastIndexOf("/")) || "/";
+              const name = args.path.split("/").pop();
+              if (tree.get(parent)?.some(e => e.name === name)) throw Error("An entry already exists: " + args.path);
+              tree.get(parent)?.push({ name, is_dir: true, size: 0, modified: 1700000000 });
+              tree.set(args.path, []);
+            } else {
+              for (const source of args.sources) {
+                const parent = source.slice(0, source.lastIndexOf("/")) || "/";
+                const name = source.split("/").pop();
+                const entry = tree.get(parent)?.find(e => e.name === name);
+                if (!entry) throw Error("Entry not found: " + source);
+                if (tree.get(args.destination)?.some(e => e.name === name)) throw Error("An entry already exists");
+              }
+              for (const source of args.sources) {
+                const parent = source.slice(0, source.lastIndexOf("/")) || "/";
+                const name = source.split("/").pop();
+                const entries = tree.get(parent)!;
+                const index = entries.findIndex(e => e.name === name);
+                tree.get(args.destination)!.push(entries.splice(index, 1)[0]);
+                const target = `${args.destination === "/" ? "" : args.destination}/${name}`;
+                for (const [key, children] of [...tree]) {
+                  if (key === source || key.startsWith(source + "/")) {
+                    tree.delete(key);
+                    tree.set(target + key.slice(source.length), children);
+                  }
+                }
+              }
+            }
+            return;
+          }
           if (cmd === "get_file_metadata") {
             if (api.delayed && args.path.includes("000"))
               await new Promise((r) => setTimeout(r, 400));

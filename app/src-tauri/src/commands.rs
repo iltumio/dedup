@@ -113,6 +113,36 @@ pub async fn list_dir(state: State<'_, AppState>, path: String) -> Result<Vec<Di
 }
 
 #[tauri::command]
+pub async fn create_dir(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    state
+        .run_blocking(move |state| {
+            let _operation = crate::migration::OperationGuard::acquire(state)?;
+            let guard = state.ensure_store()?;
+            let store = guard.as_ref().ok_or("No store loaded.")?;
+            store.create_dir(&path).map_err(|e| e.to_string())
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn move_entries(
+    state: State<'_, AppState>,
+    sources: Vec<String>,
+    destination: String,
+) -> Result<(), String> {
+    state
+        .run_blocking(move |state| {
+            let _operation = crate::migration::OperationGuard::acquire(state)?;
+            let guard = state.ensure_store()?;
+            let store = guard.as_ref().ok_or("No store loaded.")?;
+            store
+                .move_entries(&sources, &destination)
+                .map_err(|e| e.to_string())
+        })
+        .await
+}
+
+#[tauri::command]
 pub async fn get_file_metadata(
     state: State<'_, AppState>,
     path: String,
