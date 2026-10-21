@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org), and the changelog is maint
 automatically by [Knope](https://knope.tech) from
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## 0.3.3 (2026-10-21)
+
+### Features
+
+- create folders and move archived files
+
+#### Reorganize files and folders inside an archive
+
+Create empty folders and move selected files or entire folders to another
+location in the desktop app, including moving files out of or back into the
+archive root. Create a destination folder directly from the move dialog.
+
+Moves update virtual paths and the duplicate index atomically, preserve file
+content and metadata in both original and FastCDC archives, and reject name
+conflicts without replacing existing entries.
+
 ## 0.3.2 (2026-10-09)
 
 ### Fixes
